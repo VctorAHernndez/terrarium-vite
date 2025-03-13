@@ -21,6 +21,7 @@ import { MESSAGE_TYPES, PATH_STATUS } from './constants.js';
 
 const MIN_ABOVE_GROUND_DISTANCE = 20;
 const MAX_CONSECUTIVE_MISSING_INTERSECTIONS = 10;
+const MAX_NUMBER_OF_FRAME_RETRIES = 5000;
 const MESSAGE_DELAY_IN_MS = 5000;
 const PATH_WAIT_DELAY_IN_MS = 100;
 
@@ -242,7 +243,8 @@ async function animate(
   currentPathNumber: number,
   csvURL: string,
   currentPathData: Point[],
-  currentFrameIndex: number
+  currentFrameIndex: number,
+  currentFrameRetryCount: number
 ) {
   // Once the path has completed,
   // try to load the next path,
@@ -280,9 +282,32 @@ async function animate(
   // Render the scene
   renderer.render(scene, camera);
 
-  // If tiles aren't loaded yet, retry the frame
-  // TODO: this opens it up to infinite loops!
+  // If tiles aren't loaded yet,
+  // retry the frame,
+  // unless we've exceeded the per-frame retry limit.
   if (tiles.loadProgress < 1 || !tilesLoading) {
+    if (currentFrameRetryCount >= MAX_NUMBER_OF_FRAME_RETRIES) {
+      console.warn(
+        `Tiles not loaded after ${MAX_NUMBER_OF_FRAME_RETRIES} retries, skipping frame #${currentFrameIndex} for Path #${currentPathNumber}`
+      );
+      requestAnimationFrame(() =>
+        animate(
+          tiles,
+          camera,
+          raycaster,
+          renderer,
+          scene,
+          totalPathsCount,
+          currentPathNumber,
+          csvURL,
+          currentPathData,
+          currentFrameIndex + 1,
+          0
+        )
+      );
+      return;
+    }
+
     console.warn(
       `Tiles not loaded yet, retrying frame #${
         currentFrameIndex + 1
@@ -299,7 +324,8 @@ async function animate(
         currentPathNumber,
         csvURL,
         currentPathData,
-        currentFrameIndex
+        currentFrameIndex,
+        currentFrameRetryCount + 1
       )
     );
     return;
@@ -351,7 +377,8 @@ async function animate(
         currentPathNumber,
         csvURL,
         currentPathData,
-        currentFrameIndex + 1
+        currentFrameIndex + 1,
+        0
       )
     );
     return;
@@ -441,7 +468,8 @@ async function animate(
         currentPathNumber,
         csvURL,
         currentPathData,
-        currentFrameIndex + 1
+        currentFrameIndex + 1,
+        0
       )
     );
   }
@@ -506,6 +534,7 @@ async function main() {
         currentPathNumber,
         currentCsvUrl,
         currentPathData,
+        0,
         0
       );
 
