@@ -1,0 +1,12 @@
+export const MESSAGE_TYPES = {
+  PATH_STATUS: 'PATH_STATUS',
+  FRAME_READY: 'FRAME_READY',
+  FRAME_CAPTURED: 'FRAME_CAPTURED',
+  PROCESSING_COMPLETE: 'PROCESSING_COMPLETE',
+};
+
+export const PATH_STATUS = {
+  IN_PROGRESS: 'in_progress',
+  COMPLETED: 'completed',
+  DISCARDED: 'discarded',
+};
