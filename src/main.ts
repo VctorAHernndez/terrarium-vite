@@ -467,11 +467,17 @@ async function main() {
 
   // Fetch the CSV URLs from the query string
   const urlParams = new URLSearchParams(window.location.search);
-  const rawCsvUrls = urlParams.get('csvUrls') || (import.meta.env.VITE_DEBUG_CSV_URLS as string);
+  const rawCsvUrls = urlParams.get('csvUrls') || null;
+
+  if (!rawCsvUrls) {
+    console.error('No CSV URLs provided');
+    return;
+  }
+
   const csvUrls = rawCsvUrls.split(',');
 
   if (!isArrayOfString(csvUrls) || csvUrls.length === 0) {
-    console.error('No CSV URLs provided');
+    console.error('No valid CSV URLs provided');
     return;
   }
 
