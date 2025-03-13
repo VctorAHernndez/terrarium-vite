@@ -57,12 +57,6 @@ function isArrayOfString(value: any) {
   return !value.some((item) => typeof item !== 'string');
 }
 
-function setHeading(camera: PerspectiveCamera, degrees: number) {
-  camera.rotation.order = 'YXZ';
-  camera.rotation.y = -(degrees + 90) * MathUtils.DEG2RAD;
-  camera.updateMatrixWorld();
-}
-
 function onWindowResize(camera: PerspectiveCamera, renderer: WebGLRenderer) {
   camera.aspect = 1; // Aspect ratio
   renderer.setSize(RENDERER_WIDTH, RENDERER_HEIGHT);
@@ -323,6 +317,7 @@ async function animate(
     console.log(`No intersection found (${consecutiveMissingIntersections} in a row)`);
 
     // Check if we need to skip this path due to distance issues
+    // TODO: ignore discard to maximize number of frames per path?
     if (consecutiveMissingIntersections >= MAX_CONSECUTIVE_MISSING_INTERSECTIONS) {
       console.log(
         `${MAX_CONSECUTIVE_MISSING_INTERSECTIONS} consecutive missing intersections for path ${currentPathNumber}, skipping to next path`
@@ -363,6 +358,7 @@ async function animate(
   }
 
   // Discard the entire path if the intersection is too close to the ground
+  // TODO: ignore discard to maximize number of frames per path?
   if (lookAtPoint.distance < MIN_ABOVE_GROUND_DISTANCE) {
     console.log(
       `Intersection too close (${lookAtPoint.distance.toFixed(
@@ -499,21 +495,6 @@ async function main() {
 
     if (currentPathData.length > 0) {
       atLeastOnePathProcessed = true;
-
-      // Move camera to the first point
-      const [firstPoint] = currentPathData;
-      // TODO: isn't this +100 throwing off the distance calculations?
-      camera.position.set(0, firstPoint.altitude + 100, 0);
-      // @ts-ignore
-      tiles.setLatLonToYUp(firstPoint.lat * MathUtils.DEG2RAD, firstPoint.lng * MathUtils.DEG2RAD);
-
-      // TODO: validate if rotation is supposed to be set on each new path???? or if it should be on (first path, first frame)
-      camera.rotation.set(
-        -(90 - firstPoint.tilt) * MathUtils.DEG2RAD, // X (tilt)
-        -(firstPoint.heading + 90) * MathUtils.DEG2RAD, // Y (heading)
-        firstPoint.roll * MathUtils.DEG2RAD // Z (roll)
-      );
-      setHeading(camera, firstPoint.heading);
 
       animate(
         tiles,
