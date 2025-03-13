@@ -22,6 +22,10 @@ import { MESSAGE_TYPES, PATH_STATUS } from './constants.js';
 const MIN_ABOVE_GROUND_DISTANCE = 20;
 const MAX_CONSECUTIVE_MISSING_INTERSECTIONS = 10;
 const MESSAGE_DELAY_IN_MS = 5000;
+const PATH_WAIT_DELAY_IN_MS = 100;
+
+const RENDERER_WIDTH = 1024;
+const RENDERER_HEIGHT = 1024;
 
 // Global flags
 let tilesLoading = false;
@@ -60,7 +64,7 @@ function setHeading(camera: PerspectiveCamera, degrees: number) {
 
 function onWindowResize(camera: PerspectiveCamera, renderer: WebGLRenderer) {
   camera.aspect = 1; // Aspect ratio
-  renderer.setSize(1024, 1024);
+  renderer.setSize(RENDERER_WIDTH, RENDERER_HEIGHT);
   camera.updateProjectionMatrix();
   renderer.setPixelRatio(2); // Use fixed pixel ratio for consistent output, higher nubmers give better quality, but can be pretty slow if gpu is shitty, or using cpu/igpu.
 }
@@ -69,6 +73,7 @@ function getLookAtPoint(tiles: TilesRenderer, camera: PerspectiveCamera, raycast
   raycaster.setFromCamera({ x: 0, y: 0 } as Vector2, camera);
   const intersects = raycaster.intersectObject(tiles.group, true);
 
+  // TODO: what if there are multiple intersections?
   if (intersects.length > 0) {
     const point = intersects[0].point;
     // Convert world position to local position in tiles coordinate system
@@ -99,6 +104,7 @@ function getGroundDistance(tiles: TilesRenderer, camera: PerspectiveCamera) {
   // Intersect with the tiles
   const intersects = downRaycaster.intersectObject(tiles.group, true);
 
+  // TODO: what if there are multiple intersections?
   if (intersects.length > 0) {
     const point = intersects[0].point;
 
@@ -175,7 +181,7 @@ function reinstantiateTiles(
   tiles.setCamera(camera);
 }
 
-async function loadPathNew(currentPathNumber: number, csvURL: string) {
+async function loadPath(currentPathNumber: number, csvURL: string) {
   try {
     // First check if the file exists without fetching its contents
     const checkResponse = await fetch(csvURL, { method: 'HEAD' });
@@ -231,7 +237,7 @@ async function loadPathNew(currentPathNumber: number, csvURL: string) {
   }
 }
 
-async function animateNew(
+async function animate(
   tiles: TilesRenderer,
   camera: PerspectiveCamera,
   raycaster: Raycaster,
@@ -281,9 +287,13 @@ async function animateNew(
   // If tiles aren't loaded yet, retry the frame
   // TODO: this opens it up to infinite loops!
   if (tiles.loadProgress < 1 || !tilesLoading) {
-    console.warn(`Tiles not loaded yet, retrying frame #${currentFrameIndex + 1} for Path #${currentPathNumber}...`);
+    console.warn(
+      `Tiles not loaded yet, retrying frame #${
+        currentFrameIndex + 1
+      } for Path #${currentPathNumber}...`
+    );
     requestAnimationFrame(() =>
-      animateNew(
+      animate(
         tiles,
         camera,
         raycaster,
@@ -334,7 +344,7 @@ async function animateNew(
 
     // If we haven't hit the threshold, continue to next frame
     requestAnimationFrame(() =>
-      animateNew(
+      animate(
         tiles,
         camera,
         raycaster,
@@ -386,8 +396,8 @@ async function animateNew(
     heading: currentPoint.heading,
     tilt: currentPoint.tilt,
     roll: currentPoint.roll,
-    width: 1024,
-    height: 1024,
+    width: RENDERER_WIDTH,
+    height: RENDERER_HEIGHT,
     timestamp: new Date().toISOString(),
     lookAtPoint: lookAtPoint,
     groundDistance: getGroundDistance(tiles, camera),
@@ -423,7 +433,7 @@ async function animateNew(
     console.error('Error during frame capture:', error);
   } finally {
     requestAnimationFrame(() =>
-      animateNew(
+      animate(
         tiles,
         camera,
         raycaster,
@@ -447,6 +457,7 @@ async function main() {
   renderer.setClearColor(0x87ceeb);
   document.body.appendChild(renderer.domElement);
 
+  // TODO: is the fov fixed? is the near plane fixed? is the far plane fixed?
   const camera = new PerspectiveCamera(35, window.innerWidth / window.innerHeight, 1, 16000000);
   const tiles = new TilesRenderer();
 
@@ -454,7 +465,7 @@ async function main() {
 
   // Fetch the CSV URLs from the query string
   const urlParams = new URLSearchParams(window.location.search);
-  const rawCsvUrls = urlParams.get('csvUrls') || import.meta.env.VITE_DEBUG_CSV_URLS as string;
+  const rawCsvUrls = urlParams.get('csvUrls') || (import.meta.env.VITE_DEBUG_CSV_URLS as string);
   const csvUrls = rawCsvUrls.split(',');
 
   if (!isArrayOfString(csvUrls) || csvUrls.length === 0) {
@@ -476,11 +487,12 @@ async function main() {
     currentPathPending = true;
 
     const currentCsvUrl = csvUrls[currentPathNumber - 1];
-    const currentPathData = await loadPathNew(currentPathNumber, currentCsvUrl);
+    const currentPathData = await loadPath(currentPathNumber, currentCsvUrl);
 
     if (currentPathData.length > 0) {
       // Move camera to the first point
       const [firstPoint] = currentPathData;
+      // TODO: isn't this +100 throwing off the distance calculations?
       camera.position.set(0, firstPoint.altitude + 100, 0);
       tiles.setLatLonToYUp(firstPoint.lat * MathUtils.DEG2RAD, firstPoint.lng * MathUtils.DEG2RAD);
 
@@ -492,7 +504,7 @@ async function main() {
       );
       setHeading(camera, firstPoint.heading);
 
-      animateNew(
+      animate(
         tiles,
         camera,
         raycaster,
@@ -507,7 +519,7 @@ async function main() {
 
       // Wait for the current path to complete before moving to the next one
       while (currentPathPending) {
-        await new Promise((_resolve) => setTimeout(_resolve, 100));
+        await new Promise((_resolve) => setTimeout(_resolve, PATH_WAIT_DELAY_IN_MS));
       }
     }
   }

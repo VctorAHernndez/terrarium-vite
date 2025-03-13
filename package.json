@@ -4,9 +4,9 @@
   "version": "0.0.1",
   "type": "module",
   "scripts": {
-    "lint": "eslint './src/**/*.{js,jsx,ts,tsx}'",
-    "lint:fix": "eslint --fix './src/**/*.{js,jsx,ts,tsx}'",
-    "format": "prettier --write './src/**/*.{js,jsx,ts,tsx,css,scss,json}' --config ./.prettierrc",
+    "lint": "eslint './src/**/*.{js,ts}'",
+    "lint:fix": "eslint --fix './src/**/*.{js,ts}'",
+    "format": "prettier --write './src/**/*.{js,ts,css,json}' --config ./.prettierrc",
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
