@@ -268,6 +268,7 @@ async function animate(
 
   // Re-position camera for current point
   const currentPoint = currentPathData[currentFrameIndex];
+  // @ts-ignore
   tiles.setLatLonToYUp(currentPoint.lat * MathUtils.DEG2RAD, currentPoint.lng * MathUtils.DEG2RAD);
   camera.position.set(0, currentPoint.altitude, 0);
   camera.rotation.order = 'YXZ';
@@ -494,6 +495,7 @@ async function main() {
       const [firstPoint] = currentPathData;
       // TODO: isn't this +100 throwing off the distance calculations?
       camera.position.set(0, firstPoint.altitude + 100, 0);
+      // @ts-ignore
       tiles.setLatLonToYUp(firstPoint.lat * MathUtils.DEG2RAD, firstPoint.lng * MathUtils.DEG2RAD);
 
       // TODO: validate if rotation is supposed to be set on each new path???? or if it should be on (first path, first frame)
