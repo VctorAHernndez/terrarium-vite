@@ -31,6 +31,7 @@ const RENDERER_HEIGHT = 1024;
 let tilesLoading = false;
 let consecutiveMissingIntersections = 0;
 let currentPathPending = false;
+let atLeastOnePathProcessed = false;
 
 type Point = {
   altitude: number;
@@ -491,6 +492,8 @@ async function main() {
     const currentPathData = await loadPath(currentPathNumber, currentCsvUrl);
 
     if (currentPathData.length > 0) {
+      atLeastOnePathProcessed = true;
+
       // Move camera to the first point
       const [firstPoint] = currentPathData;
       // TODO: isn't this +100 throwing off the distance calculations?
@@ -523,7 +526,15 @@ async function main() {
       while (currentPathPending) {
         await new Promise((_resolve) => setTimeout(_resolve, PATH_WAIT_DELAY_IN_MS));
       }
+    } else {
+      currentPathPending = false;
     }
+  }
+
+  // Make sure we send the processing complete message
+  if (!atLeastOnePathProcessed) {
+    console.log('All paths complete');
+    console.log(MESSAGE_TYPES.PROCESSING_COMPLETE);
   }
 }
 
