@@ -122,6 +122,13 @@ function getGroundDistance(tiles: TilesRenderer, camera: PerspectiveCamera) {
   return null;
 }
 
+function getPathNumberFromCsvUrl(csvUrl: string) {
+  // Example URL: https://storage.googleapis.com/tera-public/terrarium-input/03-13-25/vm1/path_1.csv
+  const portions = csvUrl.split('/');
+  const currentPathNumberString = portions[portions.length - 1].replace('path_', '').replace('.csv', '');
+  return Number(currentPathNumberString);
+}
+
 function updatePathStatus(
   pathNumber: number,
   status: string,
@@ -512,13 +519,14 @@ async function main() {
     tilesLoading = true;
   });
 
-  for (let currentPathNumber = 1; currentPathNumber <= csvUrls.length; currentPathNumber++) {
+  for (let i = 0; i < csvUrls.length; i++) {
     // Reset all state for new path
     tilesLoading = false;
     consecutiveMissingIntersections = 0;
     currentPathPending = true;
 
-    const currentCsvUrl = csvUrls[currentPathNumber - 1];
+    const currentCsvUrl = csvUrls[i];
+    const currentPathNumber = getPathNumberFromCsvUrl(currentCsvUrl);
     const currentPathData = await loadPath(currentPathNumber, currentCsvUrl);
 
     if (currentPathData.length > 0) {
