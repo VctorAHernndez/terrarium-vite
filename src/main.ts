@@ -125,7 +125,9 @@ function getGroundDistance(tiles: TilesRenderer, camera: PerspectiveCamera) {
 function getPathNumberFromCsvUrl(csvUrl: string) {
   // Example URL: https://storage.googleapis.com/tera-public/terrarium-input/03-13-25/vm1/path_1.csv
   const portions = csvUrl.split('/');
-  const currentPathNumberString = portions[portions.length - 1].replace('path_', '').replace('.csv', '');
+  const currentPathNumberString = portions[portions.length - 1]
+    .replace('path_', '')
+    .replace('.csv', '');
   return Number(currentPathNumberString);
 }
 
@@ -247,6 +249,7 @@ async function animate(
   renderer: WebGLRenderer,
   scene: Scene,
   totalPathsCount: number,
+  currentPathIndex: number,
   currentPathNumber: number,
   csvUrl: string,
   currentPathData: Point[],
@@ -260,7 +263,7 @@ async function animate(
     console.log(`Path ${currentPathNumber} complete.`);
     updatePathStatus(currentPathNumber, PATH_STATUS.COMPLETED, csvUrl);
 
-    if (currentPathNumber >= totalPathsCount) {
+    if (currentPathIndex >= totalPathsCount - 1) {
       console.log('All paths complete');
       console.log(MESSAGE_TYPES.PROCESSING_COMPLETE);
     }
@@ -305,6 +308,7 @@ async function animate(
           renderer,
           scene,
           totalPathsCount,
+          currentPathIndex,
           currentPathNumber,
           csvUrl,
           currentPathData,
@@ -328,6 +332,7 @@ async function animate(
         renderer,
         scene,
         totalPathsCount,
+        currentPathIndex,
         currentPathNumber,
         csvUrl,
         currentPathData,
@@ -362,7 +367,7 @@ async function animate(
         `${MAX_CONSECUTIVE_MISSING_INTERSECTIONS} consecutive missing intersections`
       );
 
-      if (currentPathNumber >= totalPathsCount) {
+      if (currentPathIndex >= totalPathsCount - 1) {
         console.log('All paths complete');
         console.log(MESSAGE_TYPES.PROCESSING_COMPLETE);
       }
@@ -381,6 +386,7 @@ async function animate(
         renderer,
         scene,
         totalPathsCount,
+        currentPathIndex,
         currentPathNumber,
         csvUrl,
         currentPathData,
@@ -406,7 +412,7 @@ async function animate(
       `intersection too close (${lookAtPoint.distance.toFixed(2)}m)`
     );
 
-    if (currentPathNumber >= totalPathsCount) {
+    if (currentPathIndex >= totalPathsCount - 1) {
       console.log('All paths complete');
       console.log(MESSAGE_TYPES.PROCESSING_COMPLETE);
     }
@@ -472,6 +478,7 @@ async function animate(
         renderer,
         scene,
         totalPathsCount,
+        currentPathIndex,
         currentPathNumber,
         csvUrl,
         currentPathData,
@@ -519,13 +526,13 @@ async function main() {
     tilesLoading = true;
   });
 
-  for (let i = 0; i < csvUrls.length; i++) {
+  for (let currentPathIndex = 0; currentPathIndex < csvUrls.length; currentPathIndex++) {
     // Reset all state for new path
     tilesLoading = false;
     consecutiveMissingIntersections = 0;
     currentPathPending = true;
 
-    const currentCsvUrl = csvUrls[i];
+    const currentCsvUrl = csvUrls[currentPathIndex];
     const currentPathNumber = getPathNumberFromCsvUrl(currentCsvUrl);
     const currentPathData = await loadPath(currentPathNumber, currentCsvUrl);
 
@@ -539,6 +546,7 @@ async function main() {
         renderer,
         scene,
         csvUrls.length,
+        currentPathIndex,
         currentPathNumber,
         currentCsvUrl,
         currentPathData,
