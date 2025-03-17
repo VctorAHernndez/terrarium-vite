@@ -184,21 +184,21 @@ function reinstantiateTiles(
   tiles.setCamera(camera);
 }
 
-async function loadPath(currentPathNumber: number, csvURL: string) {
+async function loadPath(currentPathNumber: number, csvUrl: string) {
   try {
     // First check if the file exists without fetching its contents
-    const checkResponse = await fetch(csvURL, { method: 'HEAD' });
+    const checkResponse = await fetch(csvUrl, { method: 'HEAD' });
 
     // Invalid responses should be ignored
     // and skipped to the next path.
     if (!checkResponse.ok) {
-      console.log(`Invalid response was received for Path #${currentPathNumber} (${csvURL})`);
-      updatePathStatus(currentPathNumber, PATH_STATUS.DISCARDED, csvURL, 'no valid data');
+      console.log(`Invalid response was received for Path #${currentPathNumber} (${csvUrl})`);
+      updatePathStatus(currentPathNumber, PATH_STATUS.DISCARDED, csvUrl, 'no valid data');
       return [];
     }
 
     // If file exists, proceed with loading
-    const response = await fetch(csvURL);
+    const response = await fetch(csvUrl);
     const csvText = await response.text();
 
     // TODO: maybe further validation that it's a valid CSV file
@@ -214,7 +214,7 @@ async function loadPath(currentPathNumber: number, csvURL: string) {
       updatePathStatus(
         currentPathNumber,
         PATH_STATUS.DISCARDED,
-        csvURL,
+        csvUrl,
         results.errors.map((e) => e.message).join(', ')
       );
       return [];
@@ -228,14 +228,14 @@ async function loadPath(currentPathNumber: number, csvURL: string) {
     // Skip to the next path if there are no points
     if (newPathData.length <= 0) {
       console.log(`Path ${currentPathNumber} has no points`);
-      updatePathStatus(currentPathNumber, PATH_STATUS.DISCARDED, csvURL, 'no points');
+      updatePathStatus(currentPathNumber, PATH_STATUS.DISCARDED, csvUrl, 'no points');
       return [];
     }
 
     return newPathData;
   } catch (e: any) {
     console.error(`Error while loading Path #${currentPathNumber}:`, e);
-    updatePathStatus(currentPathNumber, PATH_STATUS.DISCARDED, csvURL, `error: ${e.message}`);
+    updatePathStatus(currentPathNumber, PATH_STATUS.DISCARDED, csvUrl, `error: ${e.message}`);
     return [];
   }
 }
@@ -248,7 +248,7 @@ async function animate(
   scene: Scene,
   totalPathsCount: number,
   currentPathNumber: number,
-  csvURL: string,
+  csvUrl: string,
   currentPathData: Point[],
   currentFrameIndex: number,
   currentFrameRetryCount: number
@@ -258,7 +258,7 @@ async function animate(
   // exiting if there are no more paths to be processed.
   if (currentFrameIndex >= currentPathData.length) {
     console.log(`Path ${currentPathNumber} complete.`);
-    updatePathStatus(currentPathNumber, PATH_STATUS.COMPLETED, csvURL);
+    updatePathStatus(currentPathNumber, PATH_STATUS.COMPLETED, csvUrl);
 
     if (currentPathNumber >= totalPathsCount) {
       console.log('All paths complete');
@@ -306,7 +306,7 @@ async function animate(
           scene,
           totalPathsCount,
           currentPathNumber,
-          csvURL,
+          csvUrl,
           currentPathData,
           currentFrameIndex + 1,
           0
@@ -329,7 +329,7 @@ async function animate(
         scene,
         totalPathsCount,
         currentPathNumber,
-        csvURL,
+        csvUrl,
         currentPathData,
         currentFrameIndex,
         currentFrameRetryCount + 1
@@ -358,7 +358,7 @@ async function animate(
       updatePathStatus(
         currentPathNumber,
         PATH_STATUS.DISCARDED,
-        csvURL,
+        csvUrl,
         `${MAX_CONSECUTIVE_MISSING_INTERSECTIONS} consecutive missing intersections`
       );
 
@@ -382,7 +382,7 @@ async function animate(
         scene,
         totalPathsCount,
         currentPathNumber,
-        csvURL,
+        csvUrl,
         currentPathData,
         currentFrameIndex + 1,
         0
@@ -402,7 +402,7 @@ async function animate(
     updatePathStatus(
       currentPathNumber,
       PATH_STATUS.DISCARDED,
-      csvURL,
+      csvUrl,
       `intersection too close (${lookAtPoint.distance.toFixed(2)}m)`
     );
 
@@ -473,7 +473,7 @@ async function animate(
         scene,
         totalPathsCount,
         currentPathNumber,
-        csvURL,
+        csvUrl,
         currentPathData,
         currentFrameIndex + 1,
         0
