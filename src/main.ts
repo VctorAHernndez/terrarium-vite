@@ -24,6 +24,8 @@ const MAX_CONSECUTIVE_MISSING_INTERSECTIONS = 10;
 const MAX_NUMBER_OF_FRAME_RETRIES = 5000;
 const MESSAGE_DELAY_IN_MS = 5000;
 const PATH_WAIT_DELAY_IN_MS = 100;
+const SKIP_PATH_AFTER_EXCESSIVE_MISSING_INTERSECTIONS = true;
+const SKIP_PATH_AFTER_COLLISION_WITH_GROUND = true;
 
 const RENDERER_WIDTH = 1024;
 const RENDERER_HEIGHT = 1024;
@@ -152,7 +154,8 @@ function reinstantiateTiles(
   tiles: TilesRenderer,
   camera: PerspectiveCamera,
   renderer: WebGLRenderer,
-  scene: Scene
+  scene: Scene,
+  token: string
 ) {
   // Force higher detail for more distant tiles
   tiles.errorTarget = 0.1;
@@ -164,7 +167,7 @@ function reinstantiateTiles(
 
   tiles.registerPlugin(
     new CesiumIonAuthPlugin({
-      apiToken: import.meta.env.VITE_ION_KEY,
+      apiToken: token,
       assetId: '2275207',
       autoRefreshToken: true,
     })
@@ -356,7 +359,10 @@ async function animate(
 
     // Check if we need to skip this path due to distance issues
     // TODO: ignore discard to maximize number of frames per path?
-    if (consecutiveMissingIntersections >= MAX_CONSECUTIVE_MISSING_INTERSECTIONS) {
+    if (
+      consecutiveMissingIntersections >= MAX_CONSECUTIVE_MISSING_INTERSECTIONS &&
+      SKIP_PATH_AFTER_EXCESSIVE_MISSING_INTERSECTIONS
+    ) {
       console.log(
         `${MAX_CONSECUTIVE_MISSING_INTERSECTIONS} consecutive missing intersections for path ${currentPathNumber}, skipping to next path`
       );
@@ -399,7 +405,7 @@ async function animate(
 
   // Discard the entire path if the intersection is too close to the ground
   // TODO: ignore discard to maximize number of frames per path?
-  if (lookAtPoint.distance < MIN_ABOVE_GROUND_DISTANCE) {
+  if (lookAtPoint.distance < MIN_ABOVE_GROUND_DISTANCE && SKIP_PATH_AFTER_COLLISION_WITH_GROUND) {
     console.log(
       `Intersection too close (${lookAtPoint.distance.toFixed(
         2
@@ -501,10 +507,21 @@ async function main() {
   const camera = new PerspectiveCamera(35, window.innerWidth / window.innerHeight, 1, 16000000);
   const tiles = new TilesRenderer();
 
-  reinstantiateTiles(tiles, camera, renderer, scene);
-
-  // Fetch the CSV URLs from the query string
+  // Fetch all query parameters from URL
   const urlParams = new URLSearchParams(window.location.search);
+
+  // Check and validate the Cesium token
+  const token = urlParams.get('token') || null;
+
+  if (!token) {
+    console.error('No token provided');
+    return;
+  }
+
+  // TODO: how do we know that the provided token is valid at runtime?
+  reinstantiateTiles(tiles, camera, renderer, scene, token);
+
+  // Check and validate the csvUrls
   const rawCsvUrls = urlParams.get('csvUrls') || null;
 
   if (!rawCsvUrls) {
