@@ -20,12 +20,14 @@ import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 import { MESSAGE_TYPES, PATH_STATUS } from './constants.js';
 
 const MIN_ABOVE_GROUND_DISTANCE = 20;
+const MAX_ABOVE_GROUND_DISTANCE = 99_000;
 const MAX_CONSECUTIVE_MISSING_INTERSECTIONS = 10;
 const MAX_NUMBER_OF_FRAME_RETRIES = 5000;
 const MESSAGE_DELAY_IN_MS = 5000;
 const PATH_WAIT_DELAY_IN_MS = 100;
 const SKIP_PATH_AFTER_EXCESSIVE_MISSING_INTERSECTIONS = true;
 const SKIP_PATH_AFTER_COLLISION_WITH_GROUND = true;
+const SKIP_PATH_AFTER_UNREALISTIC_HEIGHT = true;
 
 const RENDERER_WIDTH = 1024;
 const RENDERER_HEIGHT = 1024;
@@ -416,6 +418,31 @@ async function animate(
       PATH_STATUS.DISCARDED,
       csvUrl,
       `intersection too close (${lookAtPoint.distance.toFixed(2)}m)`
+    );
+
+    if (currentPathIndex >= totalPathsCount - 1) {
+      console.log('All paths complete');
+      console.log(MESSAGE_TYPES.PROCESSING_COMPLETE);
+    }
+
+    currentPathPending = false;
+
+    return;
+  }
+
+  // Discard the entire path if the intersection is too far from the ground
+  // TODO: ignore discard to maximize number of frames per path?
+  if (lookAtPoint.distance > MAX_ABOVE_GROUND_DISTANCE && SKIP_PATH_AFTER_UNREALISTIC_HEIGHT) {
+    console.log(
+      `Intersection too far (${lookAtPoint.distance.toFixed(
+        2
+      )}m) for path ${currentPathNumber}, skipping to next path`
+    );
+    updatePathStatus(
+      currentPathNumber,
+      PATH_STATUS.DISCARDED,
+      csvUrl,
+      `intersection too far (${lookAtPoint.distance.toFixed(2)}m)`
     );
 
     if (currentPathIndex >= totalPathsCount - 1) {
