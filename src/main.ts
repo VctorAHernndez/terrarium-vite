@@ -19,8 +19,8 @@ import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 
 import { MESSAGE_TYPES, PATH_STATUS } from './constants.js';
 
-const MIN_ABOVE_GROUND_DISTANCE = 20;
-const MAX_ABOVE_GROUND_DISTANCE = 99_000;
+const MIN_ABOVE_GROUND_DISTANCE = 40;
+const MAX_ABOVE_GROUND_DISTANCE = 20_000;
 const MAX_CONSECUTIVE_MISSING_INTERSECTIONS = 10;
 const MAX_NUMBER_OF_FRAME_RETRIES = 5000;
 const MESSAGE_DELAY_IN_MS = 5000;
