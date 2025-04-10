@@ -14,6 +14,14 @@ import {
   Raycaster,
   Vector3,
   Vector2,
+  WebGLRenderTarget,
+  ShaderMaterial,
+  PlaneGeometry,
+  Mesh,
+  OrthographicCamera,
+  DepthTexture,
+  UnsignedShortType,
+  NearestFilter,
 } from 'three';
 import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 
@@ -62,11 +70,20 @@ function isArrayOfString(value: any) {
   return !value.some((item) => typeof item !== 'string');
 }
 
-function onWindowResize(camera: PerspectiveCamera, renderer: WebGLRenderer) {
-  camera.aspect = 1; // Aspect ratio
+function onWindowResize(
+  camera: PerspectiveCamera,
+  renderer: WebGLRenderer,
+  depthTarget: WebGLRenderTarget
+) {
+  camera.aspect = 1;
   renderer.setSize(RENDERER_WIDTH, RENDERER_HEIGHT);
+  depthTarget.setSize(RENDERER_WIDTH, RENDERER_HEIGHT);
   camera.updateProjectionMatrix();
-  renderer.setPixelRatio(2); // Use fixed pixel ratio for consistent output, higher nubmers give better quality, but can be pretty slow if gpu is shitty, or using cpu/igpu.
+
+  // Use fixed pixel ratio for consistent output.
+  // Higher nubmers give better quality,
+  // but can be pretty slow if GPU is shitty (or using CPU/iGPU).
+  renderer.setPixelRatio(2);
 }
 
 function getLookAtPoint(tiles: TilesRenderer, camera: PerspectiveCamera, raycaster: Raycaster) {
@@ -191,6 +208,78 @@ function reinstantiateTiles(
   tiles.setCamera(camera);
 }
 
+function setupDepthRendering(camera: PerspectiveCamera) {
+  // Create render target with depth texture
+  const depthTarget = new WebGLRenderTarget(RENDERER_WIDTH, RENDERER_HEIGHT);
+  depthTarget.texture.minFilter = NearestFilter;
+  depthTarget.texture.magFilter = NearestFilter;
+  depthTarget.depthTexture = new DepthTexture(RENDERER_WIDTH, RENDERER_HEIGHT);
+  depthTarget.depthTexture.type = UnsignedShortType;
+
+  // Setup post-processing for depth visualization
+  const depthCamera = new OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  const shaderMaterial = new ShaderMaterial({
+    vertexShader: `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      #include <packing>
+      varying vec2 vUv;
+      uniform sampler2D tDepth;
+      uniform float cameraNear;
+      uniform float cameraFar;
+
+      float readDepth(sampler2D depthSampler, vec2 coord) {
+        float fragCoordZ = texture2D(depthSampler, coord).x;
+        float viewZ = perspectiveDepthToViewZ(fragCoordZ, cameraNear, cameraFar);
+        float linearDepth = -viewZ;  // Convert to positive distance from camera
+        
+        // Normalize depth between 0 and 1 based on camera range
+        return (linearDepth - cameraNear) / (cameraFar - cameraNear);
+      }
+
+      void main() {
+        float depth = readDepth(tDepth, vUv);
+        
+        // Clamp depth to valid range
+        depth = clamp(depth, 0.0, 1.0);
+        
+        // Adjust contrast to make middle-range depths more visible
+        depth = pow(depth, 0.4);  // Values less than 1 will boost mid-range visibility
+        
+        // Output grayscale
+        gl_FragColor = vec4(vec3(1.0 - depth), 1.0);
+      }
+    `,
+    uniforms: {
+      tDepth: {
+        value: depthTarget.depthTexture,
+      },
+      cameraNear: {
+        value: camera.near,
+      },
+      cameraFar: {
+        value: camera.far,
+      },
+    },
+  });
+
+  const planeGeometry = new PlaneGeometry(2, 2);
+  const depthMesh = new Mesh(planeGeometry, shaderMaterial);
+  const depthScene = new Scene();
+  depthScene.add(depthMesh);
+
+  return {
+    depthTarget,
+    depthScene,
+    depthCamera,
+  };
+}
+
 async function loadPath(currentPathNumber: number, csvUrl: string) {
   try {
     // First check if the file exists without fetching its contents
@@ -249,10 +338,13 @@ async function loadPath(currentPathNumber: number, csvUrl: string) {
 
 async function animate(
   tiles: TilesRenderer,
-  camera: PerspectiveCamera,
   raycaster: Raycaster,
   renderer: WebGLRenderer,
+  camera: PerspectiveCamera,
   scene: Scene,
+  depthTarget: WebGLRenderTarget,
+  depthCamera: OrthographicCamera,
+  depthScene: Scene,
   totalPathsCount: number,
   currentPathIndex: number,
   currentPathNumber: number,
@@ -294,9 +386,6 @@ async function animate(
   camera.updateMatrixWorld();
   tiles.update();
 
-  // Render the scene
-  renderer.render(scene, camera);
-
   // If tiles aren't loaded yet,
   // retry the frame,
   // unless we've exceeded the per-frame retry limit.
@@ -308,10 +397,13 @@ async function animate(
       requestAnimationFrame(() =>
         animate(
           tiles,
-          camera,
           raycaster,
           renderer,
+          camera,
           scene,
+          depthTarget,
+          depthCamera,
+          depthScene,
           totalPathsCount,
           currentPathIndex,
           currentPathNumber,
@@ -332,10 +424,13 @@ async function animate(
     requestAnimationFrame(() =>
       animate(
         tiles,
-        camera,
         raycaster,
         renderer,
+        camera,
         scene,
+        depthTarget,
+        depthCamera,
+        depthScene,
         totalPathsCount,
         currentPathIndex,
         currentPathNumber,
@@ -389,10 +484,13 @@ async function animate(
     requestAnimationFrame(() =>
       animate(
         tiles,
-        camera,
         raycaster,
         renderer,
+        camera,
         scene,
+        depthTarget,
+        depthCamera,
+        depthScene,
         totalPathsCount,
         currentPathIndex,
         currentPathNumber,
@@ -474,7 +572,10 @@ async function animate(
     groundDistance: getGroundDistance(tiles, camera),
   };
 
-  console.log(`${MESSAGE_TYPES.FRAME_READY}_${JSON.stringify(metadata)}`);
+  // First render the normal scene and take the screenshot
+  renderer.setRenderTarget(null);
+  renderer.render(scene, camera);
+  console.log(`${MESSAGE_TYPES.REGULAR_FRAME_READY}_${JSON.stringify(metadata)}`);
 
   // Wait for Puppeteer to capture the frame,
   // unless we hit a timeout,
@@ -482,7 +583,8 @@ async function animate(
   try {
     await new Promise((resolve) => {
       const messageHandler = (event: MessageEvent) => {
-        if (event.data === MESSAGE_TYPES.FRAME_CAPTURED) {
+        // TODO: change to event.type === 'console' && event.detail?.text === MESSAGE_TYPES.REGULAR_FRAME_CAPTURED
+        if (event.data === MESSAGE_TYPES.REGULAR_FRAME_CAPTURED) {
           window.removeEventListener('message', messageHandler);
           resolve(undefined);
         }
@@ -490,26 +592,90 @@ async function animate(
 
       // Send message to Puppeteer
       window.addEventListener('message', messageHandler);
-      window.postMessage(MESSAGE_TYPES.FRAME_READY, '*');
+      window.postMessage(MESSAGE_TYPES.REGULAR_FRAME_READY, '*');
 
       // Make sure to resolve the Promise,
       // even if the message is never received.
       setTimeout(() => {
+        // TODO: change to 'console' instead of 'message'
         window.removeEventListener('message', messageHandler);
-        console.warn('Frame capture confirmation timed out');
+        console.warn('Regular frame capture confirmation timed out');
         resolve(undefined);
       }, MESSAGE_DELAY_IN_MS);
     });
   } catch (error) {
-    console.error('Error during frame capture:', error);
+    console.error('Error during regular frame capture:', error);
+
+    requestAnimationFrame(() =>
+      animate(
+        tiles,
+        raycaster,
+        renderer,
+        camera,
+        scene,
+        depthTarget,
+        depthCamera,
+        depthScene,
+        totalPathsCount,
+        currentPathIndex,
+        currentPathNumber,
+        csvUrl,
+        currentPathData,
+        currentFrameIndex + 1,
+        0
+      )
+    );
+
+    return;
+  }
+
+  // Then render depth view and take screenshot
+  // TODO: is the second rendertarget is correct?
+  renderer.setRenderTarget(depthTarget);
+  renderer.render(scene, camera);
+  renderer.setRenderTarget(null);
+  renderer.render(depthScene, depthCamera);
+  console.log(`${MESSAGE_TYPES.DEPTH_FRAME_READY}_${JSON.stringify(metadata)}`);
+
+  // Wait for Puppeteer to capture the frame,
+  // unless we hit a timeout,
+  // in which case we continue to the next frame.
+  try {
+    await new Promise((resolve) => {
+      const messageHandler = (event: MessageEvent) => {
+        // TODO: change to event.type === 'console' && event.detail?.text === MESSAGE_TYPES.REGULAR_FRAME_CAPTURED
+        if (event.data === MESSAGE_TYPES.DEPTH_FRAME_CAPTURED) {
+          window.removeEventListener('message', messageHandler);
+          resolve(undefined);
+        }
+      };
+
+      // Send message to Puppeteer
+      window.addEventListener('message', messageHandler);
+      window.postMessage(MESSAGE_TYPES.DEPTH_FRAME_READY, '*');
+
+      // Make sure to resolve the Promise,
+      // even if the message is never received.
+      setTimeout(() => {
+        // TODO: change to 'console' instead of 'message'
+        window.removeEventListener('message', messageHandler);
+        console.warn('Depth frame capture confirmation timed out');
+        resolve(undefined);
+      }, MESSAGE_DELAY_IN_MS);
+    });
+  } catch (error) {
+    console.error('Error during depth frame capture:', error);
   } finally {
     requestAnimationFrame(() =>
       animate(
         tiles,
-        camera,
         raycaster,
         renderer,
+        camera,
         scene,
+        depthTarget,
+        depthCamera,
+        depthScene,
         totalPathsCount,
         currentPathIndex,
         currentPathNumber,
@@ -531,8 +697,10 @@ async function main() {
   document.body.appendChild(renderer.domElement);
 
   // TODO: is the fov fixed? is the near plane fixed? is the far plane fixed?
-  const camera = new PerspectiveCamera(35, window.innerWidth / window.innerHeight, 1, 16000000);
+  const camera = new PerspectiveCamera(35, window.innerWidth / window.innerHeight, 1, 700);
   const tiles = new TilesRenderer();
+
+  const { depthTarget, depthScene, depthCamera } = setupDepthRendering(camera);
 
   // Fetch all query parameters from URL
   const urlParams = new URLSearchParams(window.location.search);
@@ -563,8 +731,8 @@ async function main() {
     return;
   }
 
-  onWindowResize(camera, renderer);
-  window.addEventListener('resize', () => onWindowResize(camera, renderer), false);
+  onWindowResize(camera, renderer, depthTarget);
+  window.addEventListener('resize', () => onWindowResize(camera, renderer, depthTarget), false);
   tiles.addEventListener('tiles-load-start', () => {
     console.log('Tiles loaded');
     tilesLoading = true;
@@ -585,10 +753,13 @@ async function main() {
 
       animate(
         tiles,
-        camera,
         raycaster,
         renderer,
+        camera,
         scene,
+        depthTarget,
+        depthCamera,
+        depthScene,
         csvUrls.length,
         currentPathIndex,
         currentPathNumber,
