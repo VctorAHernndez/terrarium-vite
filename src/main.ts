@@ -208,7 +208,7 @@ function reinstantiateTiles(
   tiles.setCamera(camera);
 }
 
-function setupDepthRendering(camera: PerspectiveCamera) {
+function setupDepthRendering(cameraNear: number, depthFar: number) {
   // Create render target with depth texture
   const depthTarget = new WebGLRenderTarget(RENDERER_WIDTH, RENDERER_HEIGHT);
   depthTarget.texture.minFilter = NearestFilter;
@@ -237,20 +237,20 @@ function setupDepthRendering(camera: PerspectiveCamera) {
         float fragCoordZ = texture2D(depthSampler, coord).x;
         float viewZ = perspectiveDepthToViewZ(fragCoordZ, cameraNear, cameraFar);
         float linearDepth = -viewZ;  // Convert to positive distance from camera
-        
+
         // Normalize depth between 0 and 1 based on camera range
         return (linearDepth - cameraNear) / (cameraFar - cameraNear);
       }
 
       void main() {
         float depth = readDepth(tDepth, vUv);
-        
+
         // Clamp depth to valid range
         depth = clamp(depth, 0.0, 1.0);
-        
+
         // Adjust contrast to make middle-range depths more visible
         depth = pow(depth, 0.4);  // Values less than 1 will boost mid-range visibility
-        
+
         // Output grayscale
         gl_FragColor = vec4(vec3(1.0 - depth), 1.0);
       }
@@ -260,10 +260,10 @@ function setupDepthRendering(camera: PerspectiveCamera) {
         value: depthTarget.depthTexture,
       },
       cameraNear: {
-        value: camera.near,
+        value: cameraNear,
       },
       cameraFar: {
-        value: camera.far,
+        value: depthFar,
       },
     },
   });
@@ -688,7 +688,12 @@ async function animate(
   }
 }
 
-async function main() {
+async function main(
+  cameraFov: number = 35,
+  cameraNear: number = 1,
+  cameraFar: number = 16000000,
+  depthFar: number = 700
+) {
   const scene = new Scene();
   const raycaster = new Raycaster();
 
@@ -697,10 +702,15 @@ async function main() {
   document.body.appendChild(renderer.domElement);
 
   // TODO: is the fov fixed? is the near plane fixed? is the far plane fixed?
-  const camera = new PerspectiveCamera(35, window.innerWidth / window.innerHeight, 1, 16000000);
+  const camera = new PerspectiveCamera(
+    cameraFov,
+    window.innerWidth / window.innerHeight,
+    cameraNear,
+    cameraFar
+  );
   const tiles = new TilesRenderer();
 
-  const { depthTarget, depthScene, depthCamera } = setupDepthRendering(camera);
+  const { depthTarget, depthScene, depthCamera } = setupDepthRendering(cameraNear, depthFar);
 
   // Fetch all query parameters from URL
   const urlParams = new URLSearchParams(window.location.search);
