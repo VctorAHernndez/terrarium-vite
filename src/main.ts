@@ -697,7 +697,7 @@ async function main() {
   document.body.appendChild(renderer.domElement);
 
   // TODO: is the fov fixed? is the near plane fixed? is the far plane fixed?
-  const camera = new PerspectiveCamera(35, window.innerWidth / window.innerHeight, 1, 700);
+  const camera = new PerspectiveCamera(35, window.innerWidth / window.innerHeight, 1, 16000000);
   const tiles = new TilesRenderer();
 
   const { depthTarget, depthScene, depthCamera } = setupDepthRendering(camera);
