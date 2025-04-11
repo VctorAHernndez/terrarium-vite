@@ -20,8 +20,8 @@ import {
   Mesh,
   OrthographicCamera,
   DepthTexture,
-  UnsignedShortType,
   NearestFilter,
+  FloatType,
 } from 'three';
 import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 
@@ -44,7 +44,6 @@ const RENDERER_HEIGHT = 1024;
 let tilesLoading = false;
 let consecutiveMissingIntersections = 0;
 let currentPathPending = false;
-let atLeastOnePathProcessed = false;
 
 type Point = {
   altitude: number;
@@ -73,8 +72,7 @@ function isArrayOfString(value: any) {
 function onWindowResize(
   camera: PerspectiveCamera,
   renderer: WebGLRenderer,
-  depthTarget: WebGLRenderTarget,
-  shaderMaterial: ShaderMaterial
+  depthTarget: WebGLRenderTarget
 ) {
   camera.aspect = 1;
   renderer.setSize(RENDERER_WIDTH, RENDERER_HEIGHT);
@@ -84,6 +82,8 @@ function onWindowResize(
   // shaderMaterial.uniforms.cameraNear.value = camera.near;
   // shaderMaterial.uniforms.cameraFar.value = camera.far;
   // shaderMaterial.uniforms.texelSize.value.set(1.0 / RENDERER_WIDTH, 1.0 / RENDERER_HEIGHT);
+  // shaderMaterial.uniforms.minDepth.value = minDepth;
+  // shaderMaterial.uniforms.maxDepth.value = maxDepth;
 
   camera.updateProjectionMatrix();
 
@@ -215,13 +215,13 @@ function reinstantiateTiles(
   tiles.setCamera(camera);
 }
 
-function setupDepthRendering(cameraNear: number, depthFar: number) {
+function setupDepthRendering(cameraNear: number, depthFar: number, useLogarithmicDepth: boolean) {
   // Create render target with depth texture
   const depthTarget = new WebGLRenderTarget(RENDERER_WIDTH, RENDERER_HEIGHT);
   depthTarget.texture.minFilter = NearestFilter;
   depthTarget.texture.magFilter = NearestFilter;
   depthTarget.depthTexture = new DepthTexture(RENDERER_WIDTH, RENDERER_HEIGHT);
-  depthTarget.depthTexture.type = UnsignedShortType;
+  depthTarget.depthTexture.type = FloatType;
 
   // Setup post-processing for depth visualization
   const depthCamera = new OrthographicCamera(-1, 1, 1, -1, 0, 1);
@@ -240,6 +240,9 @@ function setupDepthRendering(cameraNear: number, depthFar: number) {
       uniform sampler2D tDepth;
       uniform float cameraNear;
       uniform float cameraFar;
+      uniform float minDepth;
+      uniform float maxDepth;
+      uniform bool u_useLogarithmicDepth;
       uniform vec2 texelSize;
 
       float readDepth(sampler2D depthSampler, vec2 coord) {
@@ -247,41 +250,25 @@ function setupDepthRendering(cameraNear: number, depthFar: number) {
         float viewZ = perspectiveDepthToViewZ(fragCoordZ, cameraNear, cameraFar);
         float linearDepth = -viewZ;  // Convert to positive distance from camera
 
-        // Normalize depth between 0 and 1 based on camera range
-        return (linearDepth - cameraNear) / (cameraFar - cameraNear);
+        // Ensure inputs are positive and avoid issues
+        float clampedMinDepth = max(minDepth, 0.00001);
+        float clampedMaxDepth = max(maxDepth, clampedMinDepth + 0.00001); // Ensure max > min
+        float clampedLinearDepth = clamp(linearDepth, clampedMinDepth, clampedMaxDepth); // Clamp depth to the custom range
+ 
+        float normalizedDepth;
+        if (u_useLogarithmicDepth) {
+          // Logarithmic depth normalization using custom min/max
+          normalizedDepth = (log(clampedLinearDepth) - log(clampedMinDepth)) / (log(clampedMaxDepth) - log(clampedMinDepth));
+        } else {
+          // Linear depth normalization using custom min/max
+          normalizedDepth = (clampedLinearDepth - clampedMinDepth) / (clampedMaxDepth - clampedMinDepth);
+        }
+ 
+        // Clamp result to [0, 1] range
+        return clamp(normalizedDepth, 0.0, 1.0);
       }
 
       void main() {
-        float depth = readDepth(tDepth, vUv);
-
-        // Clamp depth to valid range
-        depth = clamp(depth, 0.0, 1.0);
-
-        // Adjust contrast to make middle-range depths more visible
-        depth = pow(depth, 0.4);  // Values less than 1 will boost mid-range visibility
-
-        // Output grayscale
-        gl_FragColor = vec4(vec3(1.0 - depth), 1.0);
-      }
-
-      float readDepthNew(sampler2D depthSampler, vec2 coord) {
-        float fragCoordZ = texture2D(depthSampler, coord).x;
-        float viewZ = perspectiveDepthToViewZ(fragCoordZ, cameraNear, cameraFar);
-        float linearDepth = -viewZ;  // Convert to positive distance from camera
-
-        // Logarithmic depth normalization
-        // Ensure inputs are positive and avoid log(0)
-        float clampedNear = max(cameraNear, 0.00001);
-        float clampedFar = max(cameraFar, clampedNear + 0.00001); // Ensure far > near
-        float clampedLinearDepth = max(linearDepth, clampedNear); // Clamp depth to be at least near
- 
-        float logDepth = (log(clampedLinearDepth) - log(clampedNear)) / (log(clampedFar) - log(clampedNear));
- 
-        // Clamp result to [0, 1] range
-        return clamp(logDepth, 0.0, 1.0);
-      }
-
-      void mainNew() {
         float centerDepth = readDepth(tDepth, vUv);
         float finalDepth = centerDepth;
 
@@ -317,6 +304,15 @@ function setupDepthRendering(cameraNear: number, depthFar: number) {
       },
       cameraFar: {
         value: depthFar,
+      },
+      minDepth: {
+        value: 100.0,
+      },
+      maxDepth: {
+        value: 500.0,
+      },
+      u_useLogarithmicDepth: {
+        value: useLogarithmicDepth,
       },
       texelSize: {
         value: new Vector2(1.0 / RENDERER_WIDTH, 1.0 / RENDERER_HEIGHT),
@@ -402,7 +398,6 @@ async function animate(
   depthTarget: WebGLRenderTarget,
   depthCamera: OrthographicCamera,
   depthScene: Scene,
-  shaderMaterial: ShaderMaterial,
   totalPathsCount: number,
   currentPathIndex: number,
   currentPathNumber: number,
@@ -462,7 +457,6 @@ async function animate(
           depthTarget,
           depthCamera,
           depthScene,
-          shaderMaterial,
           totalPathsCount,
           currentPathIndex,
           currentPathNumber,
@@ -490,7 +484,6 @@ async function animate(
         depthTarget,
         depthCamera,
         depthScene,
-        shaderMaterial,
         totalPathsCount,
         currentPathIndex,
         currentPathNumber,
@@ -551,7 +544,6 @@ async function animate(
         depthTarget,
         depthCamera,
         depthScene,
-        shaderMaterial,
         totalPathsCount,
         currentPathIndex,
         currentPathNumber,
@@ -677,7 +669,6 @@ async function animate(
         depthTarget,
         depthCamera,
         depthScene,
-        shaderMaterial,
         totalPathsCount,
         currentPathIndex,
         currentPathNumber,
@@ -703,6 +694,8 @@ async function animate(
   // shaderMaterial.uniforms.cameraNear.value = camera.near;
   // shaderMaterial.uniforms.cameraFar.value = camera.far;
   // shaderMaterial.uniforms.texelSize.value.set(1.0 / RENDERER_WIDTH, 1.0 / RENDERER_HEIGHT);
+  // shaderMaterial.uniforms.minDepth.value = minDepth;
+  // shaderMaterial.uniforms.maxDepth.value = maxDepth;
 
   renderer.render(depthScene, depthCamera);
   console.log(`${MESSAGE_TYPES.DEPTH_FRAME_READY}_${JSON.stringify(metadata)}`);
@@ -746,7 +739,6 @@ async function animate(
         depthTarget,
         depthCamera,
         depthScene,
-        shaderMaterial,
         totalPathsCount,
         currentPathIndex,
         currentPathNumber,
@@ -763,7 +755,8 @@ async function main(
   cameraFov: number = 35,
   cameraNear: number = 1,
   cameraFar: number = 16000000,
-  depthFar: number = 700
+  depthFar: number = 700,
+  useLogarithmicDepth: boolean = true
 ) {
   const scene = new Scene();
   const raycaster = new Raycaster();
@@ -781,9 +774,10 @@ async function main(
   );
   const tiles = new TilesRenderer();
 
-  const { depthTarget, depthScene, depthCamera, shaderMaterial } = setupDepthRendering(
+  const { depthTarget, depthScene, depthCamera } = setupDepthRendering(
     cameraNear,
-    depthFar
+    depthFar,
+    useLogarithmicDepth
   );
 
   // Fetch all query parameters from URL
@@ -815,16 +809,14 @@ async function main(
     return;
   }
 
-  onWindowResize(camera, renderer, depthTarget, shaderMaterial);
-  window.addEventListener(
-    'resize',
-    () => onWindowResize(camera, renderer, depthTarget, shaderMaterial),
-    false
-  );
+  onWindowResize(camera, renderer, depthTarget);
+  window.addEventListener('resize', () => onWindowResize(camera, renderer, depthTarget), false);
   tiles.addEventListener('tiles-load-start', () => {
     console.log('Tiles loaded');
     tilesLoading = true;
   });
+
+  let atLeastOnePathProcessed = false;
 
   for (let currentPathIndex = 0; currentPathIndex < csvUrls.length; currentPathIndex++) {
     // Reset all state for new path
@@ -848,7 +840,6 @@ async function main(
         depthTarget,
         depthCamera,
         depthScene,
-        shaderMaterial,
         csvUrls.length,
         currentPathIndex,
         currentPathNumber,
