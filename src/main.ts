@@ -73,11 +73,18 @@ function isArrayOfString(value: any) {
 function onWindowResize(
   camera: PerspectiveCamera,
   renderer: WebGLRenderer,
-  depthTarget: WebGLRenderTarget
+  depthTarget: WebGLRenderTarget,
+  shaderMaterial: ShaderMaterial
 ) {
   camera.aspect = 1;
   renderer.setSize(RENDERER_WIDTH, RENDERER_HEIGHT);
   depthTarget.setSize(RENDERER_WIDTH, RENDERER_HEIGHT);
+
+  // TODO: these values are fixed when shaderMaterial is defined, keeping for bookeepping's sake
+  // shaderMaterial.uniforms.cameraNear.value = camera.near;
+  // shaderMaterial.uniforms.cameraFar.value = camera.far;
+  // shaderMaterial.uniforms.texelSize.value.set(1.0 / RENDERER_WIDTH, 1.0 / RENDERER_HEIGHT);
+
   camera.updateProjectionMatrix();
 
   // Use fixed pixel ratio for consistent output.
@@ -218,6 +225,7 @@ function setupDepthRendering(cameraNear: number, depthFar: number) {
 
   // Setup post-processing for depth visualization
   const depthCamera = new OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
   const shaderMaterial = new ShaderMaterial({
     vertexShader: `
       varying vec2 vUv;
@@ -232,6 +240,7 @@ function setupDepthRendering(cameraNear: number, depthFar: number) {
       uniform sampler2D tDepth;
       uniform float cameraNear;
       uniform float cameraFar;
+      uniform vec2 texelSize;
 
       float readDepth(sampler2D depthSampler, vec2 coord) {
         float fragCoordZ = texture2D(depthSampler, coord).x;
@@ -254,6 +263,50 @@ function setupDepthRendering(cameraNear: number, depthFar: number) {
         // Output grayscale
         gl_FragColor = vec4(vec3(1.0 - depth), 1.0);
       }
+
+      float readDepthNew(sampler2D depthSampler, vec2 coord) {
+        float fragCoordZ = texture2D(depthSampler, coord).x;
+        float viewZ = perspectiveDepthToViewZ(fragCoordZ, cameraNear, cameraFar);
+        float linearDepth = -viewZ;  // Convert to positive distance from camera
+
+        // Logarithmic depth normalization
+        // Ensure inputs are positive and avoid log(0)
+        float clampedNear = max(cameraNear, 0.00001);
+        float clampedFar = max(cameraFar, clampedNear + 0.00001); // Ensure far > near
+        float clampedLinearDepth = max(linearDepth, clampedNear); // Clamp depth to be at least near
+ 
+        float logDepth = (log(clampedLinearDepth) - log(clampedNear)) / (log(clampedFar) - log(clampedNear));
+ 
+        // Clamp result to [0, 1] range
+        return clamp(logDepth, 0.0, 1.0);
+      }
+
+      void mainNew() {
+        float centerDepth = readDepth(tDepth, vUv);
+        float finalDepth = centerDepth;
+
+        // Simple gap filling: If depth is at max (far plane), check neighbors
+        if (centerDepth > 0.999) { // Use a threshold close to 1.0
+          float minNeighborDepth = 1.0;
+ 
+          // Sample neighbors
+          minNeighborDepth = min(minNeighborDepth, readDepth(tDepth, vUv + vec2(texelSize.x, 0.0)));
+          minNeighborDepth = min(minNeighborDepth, readDepth(tDepth, vUv - vec2(texelSize.x, 0.0)));
+          minNeighborDepth = min(minNeighborDepth, readDepth(tDepth, vUv + vec2(0.0, texelSize.y)));
+          minNeighborDepth = min(minNeighborDepth, readDepth(tDepth, vUv - vec2(0.0, texelSize.y)));
+ 
+          // If any neighbor is not at the far plane, use the minimum neighbor depth
+          if (minNeighborDepth < 0.999) {
+            finalDepth = minNeighborDepth;
+          }
+        }
+
+        // Adjust contrast to make middle-range depths more visible
+        float displayDepth = pow(finalDepth, 0.9);  // Values less than 1 will boost mid-range visibility
+ 
+        // Output grayscale (inverted)
+        gl_FragColor = vec4(vec3(1.0 - displayDepth), 1.0);
+      }
     `,
     uniforms: {
       tDepth: {
@@ -264,6 +317,9 @@ function setupDepthRendering(cameraNear: number, depthFar: number) {
       },
       cameraFar: {
         value: depthFar,
+      },
+      texelSize: {
+        value: new Vector2(1.0 / RENDERER_WIDTH, 1.0 / RENDERER_HEIGHT),
       },
     },
   });
@@ -277,6 +333,7 @@ function setupDepthRendering(cameraNear: number, depthFar: number) {
     depthTarget,
     depthScene,
     depthCamera,
+    shaderMaterial,
   };
 }
 
@@ -345,6 +402,7 @@ async function animate(
   depthTarget: WebGLRenderTarget,
   depthCamera: OrthographicCamera,
   depthScene: Scene,
+  shaderMaterial: ShaderMaterial,
   totalPathsCount: number,
   currentPathIndex: number,
   currentPathNumber: number,
@@ -404,6 +462,7 @@ async function animate(
           depthTarget,
           depthCamera,
           depthScene,
+          shaderMaterial,
           totalPathsCount,
           currentPathIndex,
           currentPathNumber,
@@ -431,6 +490,7 @@ async function animate(
         depthTarget,
         depthCamera,
         depthScene,
+        shaderMaterial,
         totalPathsCount,
         currentPathIndex,
         currentPathNumber,
@@ -491,6 +551,7 @@ async function animate(
         depthTarget,
         depthCamera,
         depthScene,
+        shaderMaterial,
         totalPathsCount,
         currentPathIndex,
         currentPathNumber,
@@ -616,6 +677,7 @@ async function animate(
         depthTarget,
         depthCamera,
         depthScene,
+        shaderMaterial,
         totalPathsCount,
         currentPathIndex,
         currentPathNumber,
@@ -630,10 +692,18 @@ async function animate(
   }
 
   // Then render depth view and take screenshot
-  // TODO: is the second rendertarget is correct?
+  // 1. Render scene to depth texture
   renderer.setRenderTarget(depthTarget);
   renderer.render(scene, camera);
+
+  // 2. Render depth visualization quad to canvas
   renderer.setRenderTarget(null);
+
+  // TODO: these values are fixed when shaderMaterial is defined, keeping for bookeepping's sake
+  // shaderMaterial.uniforms.cameraNear.value = camera.near;
+  // shaderMaterial.uniforms.cameraFar.value = camera.far;
+  // shaderMaterial.uniforms.texelSize.value.set(1.0 / RENDERER_WIDTH, 1.0 / RENDERER_HEIGHT);
+
   renderer.render(depthScene, depthCamera);
   console.log(`${MESSAGE_TYPES.DEPTH_FRAME_READY}_${JSON.stringify(metadata)}`);
 
@@ -676,6 +746,7 @@ async function animate(
         depthTarget,
         depthCamera,
         depthScene,
+        shaderMaterial,
         totalPathsCount,
         currentPathIndex,
         currentPathNumber,
@@ -710,7 +781,10 @@ async function main(
   );
   const tiles = new TilesRenderer();
 
-  const { depthTarget, depthScene, depthCamera } = setupDepthRendering(cameraNear, depthFar);
+  const { depthTarget, depthScene, depthCamera, shaderMaterial } = setupDepthRendering(
+    cameraNear,
+    depthFar
+  );
 
   // Fetch all query parameters from URL
   const urlParams = new URLSearchParams(window.location.search);
@@ -741,8 +815,12 @@ async function main(
     return;
   }
 
-  onWindowResize(camera, renderer, depthTarget);
-  window.addEventListener('resize', () => onWindowResize(camera, renderer, depthTarget), false);
+  onWindowResize(camera, renderer, depthTarget, shaderMaterial);
+  window.addEventListener(
+    'resize',
+    () => onWindowResize(camera, renderer, depthTarget, shaderMaterial),
+    false
+  );
   tiles.addEventListener('tiles-load-start', () => {
     console.log('Tiles loaded');
     tilesLoading = true;
@@ -770,6 +848,7 @@ async function main(
         depthTarget,
         depthCamera,
         depthScene,
+        shaderMaterial,
         csvUrls.length,
         currentPathIndex,
         currentPathNumber,
