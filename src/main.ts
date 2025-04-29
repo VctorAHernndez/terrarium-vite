@@ -38,7 +38,7 @@ const SKIP_PATH_AFTER_COLLISION_WITH_GROUND = true;
 const SKIP_PATH_AFTER_UNREALISTIC_HEIGHT = true;
 
 const RENDERER_WIDTH = 1024;
-const RENDERER_HEIGHT = 1024;
+const RENDERER_HEIGHT = 768;
 
 // Global flags
 let tilesLoading = false;
@@ -306,7 +306,7 @@ function setupDepthRendering(cameraNear: number, depthFar: number, useLogarithmi
         value: depthFar,
       },
       minDepth: {
-        value: 100.0,
+        value: 1.0,
       },
       maxDepth: {
         value: 500.0,
