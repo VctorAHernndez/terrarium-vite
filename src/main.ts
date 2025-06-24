@@ -22,6 +22,7 @@ import {
   DepthTexture,
   NearestFilter,
   FloatType,
+  TypedArray,
 } from 'three';
 import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 
@@ -215,7 +216,7 @@ function reinstantiateTiles(
   tiles.setCamera(camera);
 }
 
-function setupDepthRendering(cameraNear: number, depthFar: number, useLogarithmicDepth: boolean) {
+function setupDepthRendering(cameraNear: number, cameraFar: number, useLogarithmicDepth: boolean) {
   // Create render target with depth texture
   const depthTarget = new WebGLRenderTarget(RENDERER_WIDTH, RENDERER_HEIGHT);
   depthTarget.texture.minFilter = NearestFilter;
@@ -303,7 +304,7 @@ function setupDepthRendering(cameraNear: number, depthFar: number, useLogarithmi
         value: cameraNear,
       },
       cameraFar: {
-        value: depthFar,
+        value: cameraFar,
       },
       minDepth: {
         value: 1.0,
@@ -330,6 +331,64 @@ function setupDepthRendering(cameraNear: number, depthFar: number, useLogarithmi
     depthScene,
     depthCamera,
     shaderMaterial,
+  };
+}
+
+function getDepthMatrix(
+  depthBuffer: TypedArray,
+  width: number,
+  height: number,
+  camera: PerspectiveCamera
+): number[][] {
+  const matrix: number[][] = [];
+
+  for (let y = 0; y < height; y++) {
+    const row: number[] = [];
+    for (let x = 0; x < width; x++) {
+      const idx = y * width + x;
+      const r = depthBuffer[idx * 4];
+      const g = depthBuffer[idx * 4 + 1];
+      const b = depthBuffer[idx * 4 + 2];
+      const a = depthBuffer[idx * 4 + 3];
+
+      const relativeLuminance = 0.299 * r + 0.587 * g + 0.114 * b;
+      const normalizedDepth = relativeLuminance / 255.0;
+
+      // Convert NDC depth to actual distance from camera
+      // The depth buffer contains values in [0, 1] range where:
+      // 0 = near plane, 1 = far plane
+      // We need to convert this to actual distance in world units
+
+      // For perspective projection, the conversion is:
+      // distance = (camera.near * camera.far) / (camera.far - (camera.far - camera.near) * ndcDepth)
+      const distance =
+        (camera.near * camera.far) / (camera.far - (camera.far - camera.near) * normalizedDepth);
+      row.push(distance);
+    }
+    matrix.push(row);
+  }
+
+  return matrix;
+}
+
+function getDepthMatrixStats(depthMatrix: number[][]) {
+  let minDistance = Infinity;
+  let maxDistance = -Infinity;
+  let totalDistance = 0;
+  const totalPixels = depthMatrix.length * depthMatrix[0].length;
+
+  for (const row of depthMatrix) {
+    for (const distance of row) {
+      minDistance = Math.min(minDistance, distance);
+      maxDistance = Math.max(maxDistance, distance);
+      totalDistance += distance;
+    }
+  }
+
+  return {
+    minDistance: minDistance === Infinity ? 0 : minDistance,
+    maxDistance: maxDistance === -Infinity ? 0 : maxDistance,
+    avgDistance: totalDistance / totalPixels,
   };
 }
 
@@ -699,6 +758,25 @@ async function animate(
 
   renderer.render(depthScene, depthCamera);
   console.log(`${MESSAGE_TYPES.DEPTH_FRAME_READY}_${JSON.stringify(metadata)}`);
+
+  // Read depth buffer and generate depth matrix
+  const width = depthTarget.width;
+  const height = depthTarget.height;
+  const depthBuffer = new Uint8Array(width * height * 4);
+  renderer.readRenderTargetPixels(depthTarget, 0, 0, width, height, depthBuffer);
+  // Get unique elements from depthBuffer
+  const depthMatrix = getDepthMatrix(depthBuffer, width, height, camera);
+  const depthStats = getDepthMatrixStats(depthMatrix);
+
+  // Log the depth matrix data with statistics
+  console.log(
+    `${MESSAGE_TYPES.DEPTH_MATRIX_READY}_${JSON.stringify({
+      pathNumber: currentPathNumber,
+      frameIndex: currentFrameIndex,
+      depthMatrix,
+      depthStats,
+    })}`
+  );
 
   // Wait for Puppeteer to capture the frame,
   // unless we hit a timeout,
