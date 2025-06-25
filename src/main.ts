@@ -215,7 +215,7 @@ function reinstantiateTiles(
   tiles.setCamera(camera);
 }
 
-function setupDepthRendering(cameraNear: number, depthFar: number, useLogarithmicDepth: boolean) {
+function setupDepthRendering(cameraNear: number, cameraFar: number) {
   // Create render target with depth texture
   const depthTarget = new WebGLRenderTarget(RENDERER_WIDTH, RENDERER_HEIGHT);
   depthTarget.texture.minFilter = NearestFilter;
@@ -223,7 +223,7 @@ function setupDepthRendering(cameraNear: number, depthFar: number, useLogarithmi
   depthTarget.depthTexture = new DepthTexture(RENDERER_WIDTH, RENDERER_HEIGHT);
   depthTarget.depthTexture.type = FloatType;
 
-  // Setup post-processing for depth visualization
+  // Setup post-processing for depth packing (metric depth → RGBA8)
   const depthCamera = new OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
   const shaderMaterial = new ShaderMaterial({
@@ -240,83 +240,41 @@ function setupDepthRendering(cameraNear: number, depthFar: number, useLogarithmi
       uniform sampler2D tDepth;
       uniform float cameraNear;
       uniform float cameraFar;
-      uniform float minDepth;
-      uniform float maxDepth;
-      uniform bool u_useLogarithmicDepth;
       uniform vec2 texelSize;
 
-      float readDepth(sampler2D depthSampler, vec2 coord) {
-        float fragCoordZ = texture2D(depthSampler, coord).x;
-        float viewZ = perspectiveDepthToViewZ(fragCoordZ, cameraNear, cameraFar);
-        float linearDepth = -viewZ;  // Convert to positive distance from camera
-
-        // Ensure inputs are positive and avoid issues
-        float clampedMinDepth = max(minDepth, 0.00001);
-        float clampedMaxDepth = max(maxDepth, clampedMinDepth + 0.00001); // Ensure max > min
-        float clampedLinearDepth = clamp(linearDepth, clampedMinDepth, clampedMaxDepth); // Clamp depth to the custom range
- 
-        float normalizedDepth;
-        if (u_useLogarithmicDepth) {
-          // Logarithmic depth normalization using custom min/max
-          normalizedDepth = (log(clampedLinearDepth) - log(clampedMinDepth)) / (log(clampedMaxDepth) - log(clampedMinDepth));
-        } else {
-          // Linear depth normalization using custom min/max
-          normalizedDepth = (clampedLinearDepth - clampedMinDepth) / (clampedMaxDepth - clampedMinDepth);
-        }
- 
-        // Clamp result to [0, 1] range
-        return clamp(normalizedDepth, 0.0, 1.0);
+      // Returns depth normalised to 0-1 range (0 = near, 1 = cameraFar)
+      float readDepth( sampler2D depthSampler, vec2 coord ) {
+          float fragCoordZ = texture2D( depthSampler, coord ).x;
+          float viewZ      = perspectiveDepthToViewZ( fragCoordZ, cameraNear, cameraFar );
+          float linear     = clamp( -viewZ, 0.0, cameraFar );   // metres
+          return linear / cameraFar;                            // 0-1
       }
 
       void main() {
-        float centerDepth = readDepth(tDepth, vUv);
-        float finalDepth = centerDepth;
+        float centerDepth = readDepth( tDepth, vUv );
+        float finalDepth  = centerDepth;
 
-        // Simple gap filling: If depth is at max (far plane), check neighbors
-        if (centerDepth > 0.999) { // Use a threshold close to 1.0
-          float minNeighborDepth = 1.0;
- 
-          // Sample neighbors
-          minNeighborDepth = min(minNeighborDepth, readDepth(tDepth, vUv + vec2(texelSize.x, 0.0)));
-          minNeighborDepth = min(minNeighborDepth, readDepth(tDepth, vUv - vec2(texelSize.x, 0.0)));
-          minNeighborDepth = min(minNeighborDepth, readDepth(tDepth, vUv + vec2(0.0, texelSize.y)));
-          minNeighborDepth = min(minNeighborDepth, readDepth(tDepth, vUv - vec2(0.0, texelSize.y)));
- 
-          // If any neighbor is not at the far plane, use the minimum neighbor depth
-          if (minNeighborDepth < 0.999) {
-            finalDepth = minNeighborDepth;
+        // Gap-filling: if depth equals far-plane, try use closest neighbour that has data
+        if ( centerDepth > 0.999 ) {
+          float minNeighbour = 1.0;
+          minNeighbour = min( minNeighbour, readDepth( tDepth, vUv + vec2( texelSize.x, 0.0 ) ) );
+          minNeighbour = min( minNeighbour, readDepth( tDepth, vUv - vec2( texelSize.x, 0.0 ) ) );
+          minNeighbour = min( minNeighbour, readDepth( tDepth, vUv + vec2( 0.0, texelSize.y ) ) );
+          minNeighbour = min( minNeighbour, readDepth( tDepth, vUv - vec2( 0.0, texelSize.y ) ) );
+          if ( minNeighbour < 0.999 ) {
+            finalDepth = minNeighbour;
           }
         }
 
-        // Adjust contrast to make middle-range depths more visible
-        float displayDepth = pow(finalDepth, 0.9);  // Values less than 1 will boost mid-range visibility
- 
-        // Output grayscale (inverted)
-        gl_FragColor = vec4(vec3(1.0 - displayDepth), 1.0);
+        // Pack the 0-1 depth into RGBA8 (loss-less when saved as PNG)
+        gl_FragColor = packDepthToRGBA( finalDepth );
       }
     `,
     uniforms: {
-      tDepth: {
-        value: depthTarget.depthTexture,
-      },
-      cameraNear: {
-        value: cameraNear,
-      },
-      cameraFar: {
-        value: depthFar,
-      },
-      minDepth: {
-        value: 1.0,
-      },
-      maxDepth: {
-        value: 500.0,
-      },
-      u_useLogarithmicDepth: {
-        value: useLogarithmicDepth,
-      },
-      texelSize: {
-        value: new Vector2(1.0 / RENDERER_WIDTH, 1.0 / RENDERER_HEIGHT),
-      },
+      tDepth: { value: depthTarget.depthTexture },
+      cameraNear: { value: cameraNear },
+      cameraFar: { value: cameraFar },
+      texelSize: { value: new Vector2(1.0 / RENDERER_WIDTH, 1.0 / RENDERER_HEIGHT) },
     },
   });
 
@@ -776,8 +734,7 @@ async function main(
 
   const { depthTarget, depthScene, depthCamera } = setupDepthRendering(
     cameraNear,
-    depthFar,
-    useLogarithmicDepth
+    cameraFar
   );
 
   // Fetch all query parameters from URL
