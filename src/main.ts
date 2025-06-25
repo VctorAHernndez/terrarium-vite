@@ -342,7 +342,8 @@ function getDepthMatrix(
 ): number[][] {
   const matrix: number[][] = [];
 
-  for (let y = 0; y < height; y++) {
+  // Build matrix from bottom to top (flip vertically)
+  for (let y = height - 1; y >= 0; y--) {
     const row: number[] = [];
     for (let x = 0; x < width; x++) {
       const idx = y * width + x;
@@ -748,6 +749,14 @@ async function animate(
   renderer.setRenderTarget(depthTarget);
   renderer.render(scene, camera);
 
+  // Read depth buffer directly from the depth texture before rendering visualization
+  const width = depthTarget.width;
+  const height = depthTarget.height;
+  const depthBuffer = new Uint8Array(width * height * 4);
+  renderer.readRenderTargetPixels(depthTarget, 0, 0, width, height, depthBuffer);
+  const depthMatrix = getDepthMatrix(depthBuffer, width, height, camera);
+  const depthStats = getDepthMatrixStats(depthMatrix);
+
   // 2. Render depth visualization quad to canvas
   renderer.setRenderTarget(null);
 
@@ -759,14 +768,6 @@ async function animate(
   // shaderMaterial.uniforms.maxDepth.value = maxDepth;
 
   renderer.render(depthScene, depthCamera);
-
-  // Read depth buffer and generate depth matrix
-  const width = depthTarget.width;
-  const height = depthTarget.height;
-  const depthBuffer = new Uint8Array(width * height * 4);
-  renderer.readRenderTargetPixels(depthTarget, 0, 0, width, height, depthBuffer);
-  const depthMatrix = getDepthMatrix(depthBuffer, width, height, camera);
-  const depthStats = getDepthMatrixStats(depthMatrix);
 
   // Log the depth matrix data with statistics
   console.log(
