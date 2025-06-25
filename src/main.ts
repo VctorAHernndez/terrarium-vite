@@ -307,7 +307,7 @@ function setupDepthRendering(cameraNear: number, cameraFar: number, useLogarithm
         value: cameraFar,
       },
       minDepth: {
-        value: 1.0,
+        value: 100.0,
       },
       maxDepth: {
         value: 500.0,
@@ -757,14 +757,12 @@ async function animate(
   // shaderMaterial.uniforms.maxDepth.value = maxDepth;
 
   renderer.render(depthScene, depthCamera);
-  console.log(`${MESSAGE_TYPES.DEPTH_FRAME_READY}_${JSON.stringify(metadata)}`);
 
   // Read depth buffer and generate depth matrix
   const width = depthTarget.width;
   const height = depthTarget.height;
   const depthBuffer = new Uint8Array(width * height * 4);
   renderer.readRenderTargetPixels(depthTarget, 0, 0, width, height, depthBuffer);
-  // Get unique elements from depthBuffer
   const depthMatrix = getDepthMatrix(depthBuffer, width, height, camera);
   const depthStats = getDepthMatrixStats(depthMatrix);
 
@@ -777,6 +775,8 @@ async function animate(
       depthStats,
     })}`
   );
+
+  console.log(`${MESSAGE_TYPES.DEPTH_FRAME_READY}_${JSON.stringify(metadata)}`);
 
   // Wait for Puppeteer to capture the frame,
   // unless we hit a timeout,
