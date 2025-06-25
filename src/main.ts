@@ -361,9 +361,11 @@ function getDepthMatrix(
 
       // For perspective projection, the conversion is:
       // distance = (camera.near * camera.far) / (camera.far - (camera.far - camera.near) * ndcDepth)
-      const distance =
-        (camera.near * camera.far) / (camera.far - (camera.far - camera.near) * normalizedDepth);
-      row.push(distance);
+      // TODO: how can we access metric units instead of relative?
+      // const distance =
+      //   (camera.near * camera.far) / (camera.far - (camera.far - camera.near) * normalizedDepth);
+
+      row.push(normalizedDepth);
     }
     matrix.push(row);
   }
