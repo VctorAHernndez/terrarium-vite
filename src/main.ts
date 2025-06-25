@@ -712,7 +712,7 @@ async function animate(
 async function main(
   cameraFov: number = 35,
   cameraNear: number = 1,
-  cameraFar: number = 16000000,
+  cameraFar: number = 100000,
   depthFar: number = 700,
   useLogarithmicDepth: boolean = true
 ) {
