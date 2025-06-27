@@ -22,6 +22,7 @@ import {
   DepthTexture,
   NearestFilter,
   FloatType,
+  TypedArray,
 } from 'three';
 import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 
@@ -297,6 +298,67 @@ function setupDepthRendering(cameraNear: number, cameraFar: number) {
     depthScene,
     depthCamera,
     shaderMaterial,
+  };
+}
+
+function getDepthMatrix(
+  depthBuffer: TypedArray,
+  width: number,
+  height: number,
+  camera: PerspectiveCamera
+): number[][] {
+  const matrix: number[][] = [];
+
+  // Build matrix from bottom to top (flip vertically)
+  for (let y = height - 1; y >= 0; y--) {
+    const row: number[] = [];
+    for (let x = 0; x < width; x++) {
+      const idx = y * width + x;
+      const r = depthBuffer[idx * 4];
+      const g = depthBuffer[idx * 4 + 1];
+      const b = depthBuffer[idx * 4 + 2];
+      const a = depthBuffer[idx * 4 + 3];
+
+      const relativeLuminance = 0.299 * r + 0.587 * g + 0.114 * b;
+      const normalizedDepth = relativeLuminance / 255.0;
+
+      // Convert NDC depth to actual distance from camera
+      // The depth buffer contains values in [0, 1] range where:
+      // 0 = near plane, 1 = far plane
+      // We need to convert this to actual distance in world units
+
+      // For perspective projection, the conversion is:
+      // distance = (camera.near * camera.far) / (camera.far - (camera.far - camera.near) * ndcDepth)
+      // TODO: how can we access metric units instead of relative?
+      // const distance =
+      //   (camera.near * camera.far) / (camera.far - (camera.far - camera.near) * normalizedDepth);
+
+      row.push(normalizedDepth);
+    }
+    matrix.push(row);
+  }
+
+  return matrix;
+}
+
+function getDepthMatrixStats(depthMatrix: number[][]) {
+  let minDistance = Infinity;
+  let maxDistance = -Infinity;
+  let totalDistance = 0;
+  const totalPixels = depthMatrix.length * depthMatrix[0].length;
+
+  for (const row of depthMatrix) {
+    for (const distance of row) {
+      minDistance = Math.min(minDistance, distance);
+      maxDistance = Math.max(maxDistance, distance);
+      totalDistance += distance;
+    }
+  }
+
+  return {
+    minDistance: minDistance === Infinity ? 0 : minDistance,
+    maxDistance: maxDistance === -Infinity ? 0 : maxDistance,
+    avgDistance: totalDistance / totalPixels,
   };
 }
 
