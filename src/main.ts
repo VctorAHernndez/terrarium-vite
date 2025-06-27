@@ -79,11 +79,14 @@ function isArrayOfString(value: any) {
 function onWindowResize(
   camera: PerspectiveCamera,
   renderer: WebGLRenderer,
-  depthTarget: WebGLRenderTarget
+  ...renderTargets: WebGLRenderTarget[]
 ) {
   camera.aspect = 1;
   renderer.setSize(RENDERER_WIDTH, RENDERER_HEIGHT);
-  depthTarget.setSize(RENDERER_WIDTH, RENDERER_HEIGHT);
+
+  renderTargets.forEach((target) => {
+    target.setSize(RENDERER_WIDTH, RENDERER_HEIGHT);
+  });
 
   // TODO: these values are fixed when shaderMaterial is defined, keeping for bookeepping's sake
   // shaderMaterial.uniforms.cameraNear.value = camera.near;
@@ -230,6 +233,11 @@ function setupDepthRendering(cameraNear: number, cameraFar: number) {
   depthTarget.depthTexture = new DepthTexture(RENDERER_WIDTH, RENDERER_HEIGHT);
   depthTarget.depthTexture.type = FloatType;
 
+  // Render target that will receive the packed RGBA depth
+  const packedDepthTarget = new WebGLRenderTarget(RENDERER_WIDTH, RENDERER_HEIGHT);
+  packedDepthTarget.texture.minFilter = NearestFilter;
+  packedDepthTarget.texture.magFilter = NearestFilter;
+
   // Setup post-processing for depth packing (metric depth → RGBA8)
   const depthCamera = new OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
@@ -292,6 +300,7 @@ function setupDepthRendering(cameraNear: number, cameraFar: number) {
 
   return {
     depthTarget,
+    packedDepthTarget,
     depthScene,
     depthCamera,
     shaderMaterial,
@@ -361,6 +370,7 @@ async function animate(
   camera: PerspectiveCamera,
   scene: Scene,
   depthTarget: WebGLRenderTarget,
+  packedDepthTarget: WebGLRenderTarget,
   depthCamera: OrthographicCamera,
   depthScene: Scene,
   totalPathsCount: number,
@@ -420,6 +430,7 @@ async function animate(
           camera,
           scene,
           depthTarget,
+          packedDepthTarget,
           depthCamera,
           depthScene,
           totalPathsCount,
@@ -447,6 +458,7 @@ async function animate(
         camera,
         scene,
         depthTarget,
+        packedDepthTarget,
         depthCamera,
         depthScene,
         totalPathsCount,
@@ -507,6 +519,7 @@ async function animate(
         camera,
         scene,
         depthTarget,
+        packedDepthTarget,
         depthCamera,
         depthScene,
         totalPathsCount,
@@ -632,6 +645,7 @@ async function animate(
         camera,
         scene,
         depthTarget,
+        packedDepthTarget,
         depthCamera,
         depthScene,
         totalPathsCount,
@@ -648,12 +662,16 @@ async function animate(
   }
 
   // Then render depth view and take screenshot
-  // 1. Render scene to depth texture
+  // 1. Render scene to depth texture (depthTarget)
   renderer.setRenderTarget(depthTarget);
+  renderer.render(scene, camera);
+
+  // 2. Pack the depth texture into RGBA8 in a second pass
+  renderer.setRenderTarget(packedDepthTarget);
   renderer.render(depthScene, depthCamera);
 
   const buffer = new Uint8Array(RENDERER_WIDTH * RENDERER_HEIGHT * 4);
-  renderer.readRenderTargetPixels(depthTarget, 0, 0, RENDERER_WIDTH, RENDERER_HEIGHT, buffer);
+  renderer.readRenderTargetPixels(packedDepthTarget, 0, 0, RENDERER_WIDTH, RENDERER_HEIGHT, buffer);
 
   const matrix = [];
   for (let y = RENDERER_HEIGHT - 1; y >= 0; y--) {
@@ -669,7 +687,7 @@ async function animate(
     matrix.push(row);
   }
 
-  // 2. Render depth visualization quad to canvas
+  // Optional: render depth visualization quad to canvas
   renderer.setRenderTarget(null);
 
   // TODO: these values are fixed when shaderMaterial is defined, keeping for bookeepping's sake
@@ -686,7 +704,7 @@ async function animate(
   console.log(`${MESSAGE_TYPES.DEPTH_FRAME_READY}_${JSON.stringify({
     pathNumber: currentPathNumber,
     frameIndex: currentFrameIndex,
-    // depthMatrix: matrix,
+    depthMatrix: matrix,
   })}`);
 
   // Wait for Puppeteer to capture the frame,
@@ -726,6 +744,7 @@ async function animate(
         camera,
         scene,
         depthTarget,
+        packedDepthTarget,
         depthCamera,
         depthScene,
         totalPathsCount,
@@ -763,7 +782,7 @@ async function main(
   );
   const tiles = new TilesRenderer();
 
-  const { depthTarget, depthScene, depthCamera } = setupDepthRendering(cameraNear, cameraFar);
+  const { depthTarget, packedDepthTarget, depthScene, depthCamera } = setupDepthRendering(cameraNear, cameraFar);
 
   // Fetch all query parameters from URL
   const urlParams = new URLSearchParams(window.location.search);
@@ -794,8 +813,8 @@ async function main(
     return;
   }
 
-  onWindowResize(camera, renderer, depthTarget);
-  window.addEventListener('resize', () => onWindowResize(camera, renderer, depthTarget), false);
+  onWindowResize(camera, renderer, depthTarget, packedDepthTarget);
+  window.addEventListener('resize', () => onWindowResize(camera, renderer, depthTarget, packedDepthTarget), false);
   tiles.addEventListener('tiles-load-start', () => {
     console.log('Tiles loaded');
     tilesLoading = true;
@@ -823,6 +842,7 @@ async function main(
         camera,
         scene,
         depthTarget,
+        packedDepthTarget,
         depthCamera,
         depthScene,
         csvUrls.length,
