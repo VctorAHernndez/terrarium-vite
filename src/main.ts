@@ -36,12 +36,13 @@ const PATH_WAIT_DELAY_IN_MS = 100;
 const SKIP_PATH_AFTER_EXCESSIVE_MISSING_INTERSECTIONS = true;
 const SKIP_PATH_AFTER_COLLISION_WITH_GROUND = true;
 const SKIP_PATH_AFTER_UNREALISTIC_HEIGHT = true;
-const DEPTH_MATRIX_DECIMAL_PLACES_AMOUNT = 2;
 
 const RENDERER_WIDTH = 1024;
 const RENDERER_HEIGHT = 768;
 
-const CAMERA_FAR_MULTIPLIER_IN_METERS = 10000;
+const DEFAULT_CAMERA_FAR_IN_METERS = 100000;
+const DEFAULT_CAMERA_NEAR_IN_METERS = 1;
+const DEFAULT_CAMERA_FOV_IN_DEGREES = 35;
 
 // Global flags
 let tilesLoading = false;
@@ -79,21 +80,13 @@ function isArrayOfString(value: any) {
 function onWindowResize(
   camera: PerspectiveCamera,
   renderer: WebGLRenderer,
-  ...renderTargets: WebGLRenderTarget[]
+  depthTarget: WebGLRenderTarget,
+  packedDepthTarget: WebGLRenderTarget
 ) {
   camera.aspect = 1;
   renderer.setSize(RENDERER_WIDTH, RENDERER_HEIGHT);
-
-  renderTargets.forEach((target) => {
-    target.setSize(RENDERER_WIDTH, RENDERER_HEIGHT);
-  });
-
-  // TODO: these values are fixed when shaderMaterial is defined, keeping for bookeepping's sake
-  // shaderMaterial.uniforms.cameraNear.value = camera.near;
-  // shaderMaterial.uniforms.cameraFar.value = camera.far;
-  // shaderMaterial.uniforms.texelSize.value.set(1.0 / RENDERER_WIDTH, 1.0 / RENDERER_HEIGHT);
-  // shaderMaterial.uniforms.minDepth.value = minDepth;
-  // shaderMaterial.uniforms.maxDepth.value = maxDepth;
+  depthTarget.setSize(RENDERER_WIDTH, RENDERER_HEIGHT);
+  packedDepthTarget.setSize(RENDERER_WIDTH, RENDERER_HEIGHT);
 
   camera.updateProjectionMatrix();
 
@@ -379,7 +372,9 @@ async function animate(
   csvUrl: string,
   currentPathData: Point[],
   currentFrameIndex: number,
-  currentFrameRetryCount: number
+  currentFrameRetryCount: number,
+  debugDepthFrame: boolean,
+  roundDepthMatrix: number
 ) {
   // Once the path has completed,
   // try to load the next path,
@@ -439,7 +434,9 @@ async function animate(
           csvUrl,
           currentPathData,
           currentFrameIndex + 1,
-          0
+          0,
+          debugDepthFrame,
+          roundDepthMatrix
         )
       );
       return;
@@ -467,7 +464,9 @@ async function animate(
         csvUrl,
         currentPathData,
         currentFrameIndex,
-        currentFrameRetryCount + 1
+        currentFrameRetryCount + 1,
+        debugDepthFrame,
+        roundDepthMatrix
       )
     );
     return;
@@ -528,7 +527,9 @@ async function animate(
         csvUrl,
         currentPathData,
         currentFrameIndex + 1,
-        0
+        0,
+        debugDepthFrame,
+        roundDepthMatrix
       )
     );
     return;
@@ -654,7 +655,9 @@ async function animate(
         csvUrl,
         currentPathData,
         currentFrameIndex + 1,
-        0
+        0,
+        debugDepthFrame,
+        roundDepthMatrix
       )
     );
 
@@ -670,6 +673,7 @@ async function animate(
   renderer.setRenderTarget(packedDepthTarget);
   renderer.render(depthScene, depthCamera);
 
+  // TODO: this step is the slowest
   const buffer = new Uint8Array(RENDERER_WIDTH * RENDERER_HEIGHT * 4);
   renderer.readRenderTargetPixels(packedDepthTarget, 0, 0, RENDERER_WIDTH, RENDERER_HEIGHT, buffer);
 
@@ -678,34 +682,30 @@ async function animate(
     const row = new Array(RENDERER_WIDTH);
     for (let x = 0; x < RENDERER_WIDTH; x++) {
       const i = 4 * (y * RENDERER_WIDTH + x);
-      const depthInMeters = decodeDepthFromGrayscaleRGBA(buffer[i], buffer[i + 1], buffer[i + 2], buffer[i + 3]) * camera.far;
-      row[x] = depthInMeters;
-      if (DEPTH_MATRIX_DECIMAL_PLACES_AMOUNT) {
-        row[x] = Math.round(row[x] * 10 ** DEPTH_MATRIX_DECIMAL_PLACES_AMOUNT) / 10 ** DEPTH_MATRIX_DECIMAL_PLACES_AMOUNT;
-      }
+      const depthInMeters =
+        decodeDepthFromGrayscaleRGBA(buffer[i], buffer[i + 1], buffer[i + 2], buffer[i + 3]) *
+        camera.far;
+
+      // NOTE: set roundDepthMatrix to 0 to disable rounding
+      row[x] = Math.round(depthInMeters * 10 ** roundDepthMatrix) / 10 ** roundDepthMatrix;
     }
     matrix.push(row);
   }
 
-  // Optional: render depth visualization quad to canvas
-  renderer.setRenderTarget(null);
+  // 3. Optional: render depth visualization quad to canvas
+  // NOTE: We should avoid rendering in production to save some time
+  if (debugDepthFrame) {
+    renderer.setRenderTarget(null);
+    renderer.render(depthScene, depthCamera);
+  }
 
-  // TODO: these values are fixed when shaderMaterial is defined, keeping for bookeepping's sake
-  // shaderMaterial.uniforms.cameraNear.value = camera.near;
-  // shaderMaterial.uniforms.cameraFar.value = camera.far;
-  // shaderMaterial.uniforms.texelSize.value.set(1.0 / RENDERER_WIDTH, 1.0 / RENDERER_HEIGHT);
-  // shaderMaterial.uniforms.minDepth.value = minDepth;
-  // shaderMaterial.uniforms.maxDepth.value = maxDepth;
-
-  // TODO: change to depthMatrixRoundAmount
-  // TODO: access the depthTarget, round as a matrix
-
-  // renderer.render(depthScene, depthCamera);
-  console.log(`${MESSAGE_TYPES.DEPTH_FRAME_READY}_${JSON.stringify({
-    pathNumber: currentPathNumber,
-    frameIndex: currentFrameIndex,
-    depthMatrix: matrix,
-  })}`);
+  console.log(
+    `${MESSAGE_TYPES.DEPTH_FRAME_READY}_${JSON.stringify({
+      pathNumber: currentPathNumber,
+      frameIndex: currentFrameIndex,
+      depthMatrix: matrix,
+    })}`
+  );
 
   // Wait for Puppeteer to capture the frame,
   // unless we hit a timeout,
@@ -753,19 +753,76 @@ async function animate(
         csvUrl,
         currentPathData,
         currentFrameIndex + 1,
-        0
+        0,
+        debugDepthFrame,
+        roundDepthMatrix
       )
     );
   }
 }
 
-async function main(
-  cameraFov: number = 35,
-  cameraNear: number = 1,
-  cameraFar: number = 100000,
-  depthFar: number = 700,
-  useLogarithmicDepth: boolean = true
-) {
+function parseQueryParams() {
+  // Fetch all query parameters from URL
+  const urlParams = new URLSearchParams(window.location.search);
+
+  // Check and validate the Cesium token
+  const token = urlParams.get('token') || null;
+
+  if (!token) {
+    throw new Error('No token provided');
+  }
+
+  // Check and validate the csvUrls
+  const rawCsvUrls = urlParams.get('csvUrls') || null;
+
+  if (!rawCsvUrls) {
+    throw new Error('No CSV URLs provided');
+  }
+
+  const csvUrls = rawCsvUrls.split(',');
+
+  if (!isArrayOfString(csvUrls) || csvUrls.length === 0) {
+    throw new Error('No valid CSV URLs provided');
+  }
+
+  const cameraFov = Number(urlParams.get('cameraFov')) || DEFAULT_CAMERA_FOV_IN_DEGREES;
+
+  if (isNaN(cameraFov) || cameraFov <= 0) {
+    throw new Error('Invalid camera fov value');
+  }
+
+  const cameraNear = Number(urlParams.get('cameraNear')) || DEFAULT_CAMERA_NEAR_IN_METERS;
+
+  if (isNaN(cameraNear) || cameraNear <= 0) {
+    throw new Error('Invalid camera near value');
+  }
+
+  const cameraFar = Number(urlParams.get('cameraFar')) || DEFAULT_CAMERA_FAR_IN_METERS;
+
+  if (isNaN(cameraFar) || cameraFar <= 0) {
+    throw new Error('Invalid camera far value');
+  }
+
+  if (cameraNear >= cameraFar) {
+    throw new Error('Camera near value must be less than camera far value');
+  }
+
+  const debugDepthFrame = Boolean(urlParams.get('debugDepthFrame')) || false;
+
+  const roundDepthMatrix = Number(urlParams.get('roundDepthMatrix')) || 0;
+
+  if (isNaN(roundDepthMatrix) || roundDepthMatrix < 0) {
+    throw new Error('Invalid round depth matrix value');
+  }
+
+  return { token, csvUrls, cameraFar, cameraNear, cameraFov, debugDepthFrame, roundDepthMatrix };
+}
+
+async function main() {
+  // Fetch all query parameters from URL
+  const { token, csvUrls, cameraFar, cameraNear, cameraFov, debugDepthFrame, roundDepthMatrix } =
+    parseQueryParams();
+
   const scene = new Scene();
   const raycaster = new Raycaster();
 
@@ -773,7 +830,6 @@ async function main(
   renderer.setClearColor(0x87ceeb);
   document.body.appendChild(renderer.domElement);
 
-  // TODO: is the fov fixed? is the near plane fixed? is the far plane fixed?
   const camera = new PerspectiveCamera(
     cameraFov,
     window.innerWidth / window.innerHeight,
@@ -782,39 +838,20 @@ async function main(
   );
   const tiles = new TilesRenderer();
 
-  const { depthTarget, packedDepthTarget, depthScene, depthCamera } = setupDepthRendering(cameraNear, cameraFar);
-
-  // Fetch all query parameters from URL
-  const urlParams = new URLSearchParams(window.location.search);
-
-  // Check and validate the Cesium token
-  const token = urlParams.get('token') || null;
-
-  if (!token) {
-    console.error('No token provided');
-    return;
-  }
+  const { depthTarget, packedDepthTarget, depthScene, depthCamera } = setupDepthRendering(
+    cameraNear,
+    cameraFar
+  );
 
   // TODO: how do we know that the provided token is valid at runtime?
   reinstantiateTiles(tiles, camera, renderer, scene, token);
 
-  // Check and validate the csvUrls
-  const rawCsvUrls = urlParams.get('csvUrls') || null;
-
-  if (!rawCsvUrls) {
-    console.error('No CSV URLs provided');
-    return;
-  }
-
-  const csvUrls = rawCsvUrls.split(',');
-
-  if (!isArrayOfString(csvUrls) || csvUrls.length === 0) {
-    console.error('No valid CSV URLs provided');
-    return;
-  }
-
   onWindowResize(camera, renderer, depthTarget, packedDepthTarget);
-  window.addEventListener('resize', () => onWindowResize(camera, renderer, depthTarget, packedDepthTarget), false);
+  window.addEventListener(
+    'resize',
+    () => onWindowResize(camera, renderer, depthTarget, packedDepthTarget),
+    false
+  );
   tiles.addEventListener('tiles-load-start', () => {
     console.log('Tiles loaded');
     tilesLoading = true;
@@ -851,7 +888,9 @@ async function main(
         currentCsvUrl,
         currentPathData,
         0,
-        0
+        0,
+        debugDepthFrame,
+        roundDepthMatrix
       );
 
       // Wait for the current path to complete before moving to the next one
