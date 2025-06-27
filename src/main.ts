@@ -36,9 +36,12 @@ const PATH_WAIT_DELAY_IN_MS = 100;
 const SKIP_PATH_AFTER_EXCESSIVE_MISSING_INTERSECTIONS = true;
 const SKIP_PATH_AFTER_COLLISION_WITH_GROUND = true;
 const SKIP_PATH_AFTER_UNREALISTIC_HEIGHT = true;
+const DEPTH_MATRIX_DECIMAL_PLACES_AMOUNT = 2;
 
 const RENDERER_WIDTH = 1024;
 const RENDERER_HEIGHT = 768;
+
+const CAMERA_FAR_MULTIPLIER_IN_METERS = 10000;
 
 // Global flags
 let tilesLoading = false;
@@ -61,6 +64,10 @@ type WGS84Point = {
   lat: number;
   lon: number;
 };
+
+function decodeDepthFromGrayscaleRGBA(r: number, g: number, b: number, a: number) {
+  return (r + g / 256 + b / 65536 + a / 16777216) / 255;
+}
 
 function isArrayOfString(value: any) {
   if (!Array.isArray(value)) {
@@ -643,7 +650,24 @@ async function animate(
   // Then render depth view and take screenshot
   // 1. Render scene to depth texture
   renderer.setRenderTarget(depthTarget);
-  renderer.render(scene, camera);
+  renderer.render(depthScene, depthCamera);
+
+  const buffer = new Uint8Array(RENDERER_WIDTH * RENDERER_HEIGHT * 4);
+  renderer.readRenderTargetPixels(depthTarget, 0, 0, RENDERER_WIDTH, RENDERER_HEIGHT, buffer);
+
+  const matrix = [];
+  for (let y = RENDERER_HEIGHT - 1; y >= 0; y--) {
+    const row = new Array(RENDERER_WIDTH);
+    for (let x = 0; x < RENDERER_WIDTH; x++) {
+      const i = 4 * (y * RENDERER_WIDTH + x);
+      const depthInMeters = decodeDepthFromGrayscaleRGBA(buffer[i], buffer[i + 1], buffer[i + 2], buffer[i + 3]) * camera.far;
+      row[x] = depthInMeters;
+      if (DEPTH_MATRIX_DECIMAL_PLACES_AMOUNT) {
+        row[x] = Math.round(row[x] * 10 ** DEPTH_MATRIX_DECIMAL_PLACES_AMOUNT) / 10 ** DEPTH_MATRIX_DECIMAL_PLACES_AMOUNT;
+      }
+    }
+    matrix.push(row);
+  }
 
   // 2. Render depth visualization quad to canvas
   renderer.setRenderTarget(null);
@@ -655,8 +679,15 @@ async function animate(
   // shaderMaterial.uniforms.minDepth.value = minDepth;
   // shaderMaterial.uniforms.maxDepth.value = maxDepth;
 
-  renderer.render(depthScene, depthCamera);
-  console.log(`${MESSAGE_TYPES.DEPTH_FRAME_READY}_${JSON.stringify(metadata)}`);
+  // TODO: change to depthMatrixRoundAmount
+  // TODO: access the depthTarget, round as a matrix
+
+  // renderer.render(depthScene, depthCamera);
+  console.log(`${MESSAGE_TYPES.DEPTH_FRAME_READY}_${JSON.stringify({
+    pathNumber: currentPathNumber,
+    frameIndex: currentFrameIndex,
+    // depthMatrix: matrix,
+  })}`);
 
   // Wait for Puppeteer to capture the frame,
   // unless we hit a timeout,
@@ -732,10 +763,7 @@ async function main(
   );
   const tiles = new TilesRenderer();
 
-  const { depthTarget, depthScene, depthCamera } = setupDepthRendering(
-    cameraNear,
-    cameraFar
-  );
+  const { depthTarget, depthScene, depthCamera } = setupDepthRendering(cameraNear, cameraFar);
 
   // Fetch all query parameters from URL
   const urlParams = new URLSearchParams(window.location.search);
