@@ -38,9 +38,8 @@ const SKIP_PATH_AFTER_EXCESSIVE_MISSING_INTERSECTIONS = true;
 const SKIP_PATH_AFTER_COLLISION_WITH_GROUND = true;
 const SKIP_PATH_AFTER_UNREALISTIC_HEIGHT = true;
 
-const RENDERER_WIDTH = 1024;
-const RENDERER_HEIGHT = 768;
-
+const DEFAULT_RENDERER_WIDTH = 512;
+const DEFAULT_RENDERER_HEIGHT = 384;
 const DEFAULT_CAMERA_FAR_IN_METERS = 100000;
 const DEFAULT_CAMERA_NEAR_IN_METERS = 1;
 const DEFAULT_CAMERA_FOV_IN_DEGREES = 35;
@@ -79,15 +78,17 @@ function isArrayOfString(value: any) {
 }
 
 function onWindowResize(
+  width: number,
+  height: number,
   camera: PerspectiveCamera,
   renderer: WebGLRenderer,
   depthTarget: WebGLRenderTarget,
   packedDepthTarget: WebGLRenderTarget
 ) {
   camera.aspect = 1;
-  renderer.setSize(RENDERER_WIDTH, RENDERER_HEIGHT);
-  depthTarget.setSize(RENDERER_WIDTH, RENDERER_HEIGHT);
-  packedDepthTarget.setSize(RENDERER_WIDTH, RENDERER_HEIGHT);
+  renderer.setSize(width, height);
+  depthTarget.setSize(width, height);
+  packedDepthTarget.setSize(width, height);
 
   camera.updateProjectionMatrix();
 
@@ -219,16 +220,16 @@ function reinstantiateTiles(
   tiles.setCamera(camera);
 }
 
-function setupDepthRendering(cameraNear: number, cameraFar: number) {
+function setupDepthRendering(width: number, height: number, cameraNear: number, cameraFar: number) {
   // Create render target with depth texture
-  const depthTarget = new WebGLRenderTarget(RENDERER_WIDTH, RENDERER_HEIGHT);
+  const depthTarget = new WebGLRenderTarget(width, height);
   depthTarget.texture.minFilter = NearestFilter;
   depthTarget.texture.magFilter = NearestFilter;
-  depthTarget.depthTexture = new DepthTexture(RENDERER_WIDTH, RENDERER_HEIGHT);
+  depthTarget.depthTexture = new DepthTexture(width, height);
   depthTarget.depthTexture.type = FloatType;
 
   // Render target that will receive the packed RGBA depth
-  const packedDepthTarget = new WebGLRenderTarget(RENDERER_WIDTH, RENDERER_HEIGHT);
+  const packedDepthTarget = new WebGLRenderTarget(width, height);
   packedDepthTarget.texture.minFilter = NearestFilter;
   packedDepthTarget.texture.magFilter = NearestFilter;
 
@@ -283,7 +284,7 @@ function setupDepthRendering(cameraNear: number, cameraFar: number) {
       tDepth: { value: depthTarget.depthTexture },
       cameraNear: { value: cameraNear },
       cameraFar: { value: cameraFar },
-      texelSize: { value: new Vector2(1.0 / RENDERER_WIDTH, 1.0 / RENDERER_HEIGHT) },
+      texelSize: { value: new Vector2(1.0 / width, 1.0 / height) },
     },
   });
 
@@ -298,67 +299,6 @@ function setupDepthRendering(cameraNear: number, cameraFar: number) {
     depthScene,
     depthCamera,
     shaderMaterial,
-  };
-}
-
-function getDepthMatrix(
-  depthBuffer: TypedArray,
-  width: number,
-  height: number,
-  camera: PerspectiveCamera
-): number[][] {
-  const matrix: number[][] = [];
-
-  // Build matrix from bottom to top (flip vertically)
-  for (let y = height - 1; y >= 0; y--) {
-    const row: number[] = [];
-    for (let x = 0; x < width; x++) {
-      const idx = y * width + x;
-      const r = depthBuffer[idx * 4];
-      const g = depthBuffer[idx * 4 + 1];
-      const b = depthBuffer[idx * 4 + 2];
-      const a = depthBuffer[idx * 4 + 3];
-
-      const relativeLuminance = 0.299 * r + 0.587 * g + 0.114 * b;
-      const normalizedDepth = relativeLuminance / 255.0;
-
-      // Convert NDC depth to actual distance from camera
-      // The depth buffer contains values in [0, 1] range where:
-      // 0 = near plane, 1 = far plane
-      // We need to convert this to actual distance in world units
-
-      // For perspective projection, the conversion is:
-      // distance = (camera.near * camera.far) / (camera.far - (camera.far - camera.near) * ndcDepth)
-      // TODO: how can we access metric units instead of relative?
-      // const distance =
-      //   (camera.near * camera.far) / (camera.far - (camera.far - camera.near) * normalizedDepth);
-
-      row.push(normalizedDepth);
-    }
-    matrix.push(row);
-  }
-
-  return matrix;
-}
-
-function getDepthMatrixStats(depthMatrix: number[][]) {
-  let minDistance = Infinity;
-  let maxDistance = -Infinity;
-  let totalDistance = 0;
-  const totalPixels = depthMatrix.length * depthMatrix[0].length;
-
-  for (const row of depthMatrix) {
-    for (const distance of row) {
-      minDistance = Math.min(minDistance, distance);
-      maxDistance = Math.max(maxDistance, distance);
-      totalDistance += distance;
-    }
-  }
-
-  return {
-    minDistance: minDistance === Infinity ? 0 : minDistance,
-    maxDistance: maxDistance === -Infinity ? 0 : maxDistance,
-    avgDistance: totalDistance / totalPixels,
   };
 }
 
@@ -650,6 +590,9 @@ async function animate(
   // Reset counter when we find an intersection
   consecutiveMissingIntersections = 0;
 
+  const width = depthTarget.width;
+  const height = depthTarget.height;
+
   const metadata = {
     pathNumber: currentPathNumber,
     frameIndex: currentFrameIndex,
@@ -659,8 +602,8 @@ async function animate(
     heading: currentPoint.heading,
     tilt: currentPoint.tilt,
     roll: currentPoint.roll,
-    width: RENDERER_WIDTH,
-    height: RENDERER_HEIGHT,
+    width: width,
+    height: height,
     timestamp: new Date().toISOString(),
     lookAtPoint: lookAtPoint,
     groundDistance: getGroundDistance(tiles, camera),
@@ -736,14 +679,14 @@ async function animate(
   renderer.render(depthScene, depthCamera);
 
   // TODO: this step is the slowest
-  const buffer = new Uint8Array(RENDERER_WIDTH * RENDERER_HEIGHT * 4);
-  renderer.readRenderTargetPixels(packedDepthTarget, 0, 0, RENDERER_WIDTH, RENDERER_HEIGHT, buffer);
+  const buffer = new Uint8Array(width * height * 4);
+  renderer.readRenderTargetPixels(packedDepthTarget, 0, 0, width, height, buffer);
 
   const matrix = [];
-  for (let y = RENDERER_HEIGHT - 1; y >= 0; y--) {
-    const row = new Array(RENDERER_WIDTH);
-    for (let x = 0; x < RENDERER_WIDTH; x++) {
-      const i = 4 * (y * RENDERER_WIDTH + x);
+  for (let y = height - 1; y >= 0; y--) {
+    const row = new Array(width);
+    for (let x = 0; x < width; x++) {
+      const i = 4 * (y * width + x);
       const depthInMeters =
         decodeDepthFromGrayscaleRGBA(buffer[i], buffer[i + 1], buffer[i + 2], buffer[i + 3]) *
         camera.far;
@@ -847,6 +790,18 @@ function parseQueryParams() {
     throw new Error('No valid CSV URLs provided');
   }
 
+  const width = Number(urlParams.get('width')) || DEFAULT_RENDERER_WIDTH;
+
+  if (isNaN(width) || width <= 0) {
+    throw new Error('Invalid width value');
+  }
+
+  const height = Number(urlParams.get('height')) || DEFAULT_RENDERER_HEIGHT;
+
+  if (isNaN(height) || height <= 0) {
+    throw new Error('Invalid height value');
+  }
+
   const cameraFov = Number(urlParams.get('cameraFov')) || DEFAULT_CAMERA_FOV_IN_DEGREES;
 
   if (isNaN(cameraFov) || cameraFov <= 0) {
@@ -877,13 +832,32 @@ function parseQueryParams() {
     throw new Error('Invalid round depth matrix value');
   }
 
-  return { token, csvUrls, cameraFar, cameraNear, cameraFov, debugDepthFrame, roundDepthMatrix };
+  return {
+    token,
+    csvUrls,
+    cameraFar,
+    cameraNear,
+    cameraFov,
+    width,
+    height,
+    debugDepthFrame,
+    roundDepthMatrix,
+  };
 }
 
 async function main() {
   // Fetch all query parameters from URL
-  const { token, csvUrls, cameraFar, cameraNear, cameraFov, debugDepthFrame, roundDepthMatrix } =
-    parseQueryParams();
+  const {
+    token,
+    csvUrls,
+    cameraFar,
+    cameraNear,
+    cameraFov,
+    width,
+    height,
+    debugDepthFrame,
+    roundDepthMatrix,
+  } = parseQueryParams();
 
   const scene = new Scene();
   const raycaster = new Raycaster();
@@ -901,6 +875,8 @@ async function main() {
   const tiles = new TilesRenderer();
 
   const { depthTarget, packedDepthTarget, depthScene, depthCamera } = setupDepthRendering(
+    width,
+    height,
     cameraNear,
     cameraFar
   );
@@ -908,10 +884,10 @@ async function main() {
   // TODO: how do we know that the provided token is valid at runtime?
   reinstantiateTiles(tiles, camera, renderer, scene, token);
 
-  onWindowResize(camera, renderer, depthTarget, packedDepthTarget);
+  onWindowResize(width, height, camera, renderer, depthTarget, packedDepthTarget);
   window.addEventListener(
     'resize',
-    () => onWindowResize(camera, renderer, depthTarget, packedDepthTarget),
+    () => onWindowResize(width, height, camera, renderer, depthTarget, packedDepthTarget),
     false
   );
   tiles.addEventListener('tiles-load-start', () => {
