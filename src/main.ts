@@ -49,6 +49,10 @@ let tilesLoading = false;
 let consecutiveMissingIntersections = 0;
 let currentPathPending = false;
 
+// Collection of per-frame data used to compute view-overlap for the current path.
+// It is reset at the start of every path.
+let currentPathFrames: any[] = [];
+
 type Point = {
   altitude: number;
   distance_from_ground: number;
@@ -700,6 +704,16 @@ async function animate(
     matrix.push(row);
   }
 
+  // -------------------------------------------------------------------
+  // Store data required for overlap computation
+  // -------------------------------------------------------------------
+  currentPathFrames.push({
+    depthMatrix: matrix,
+    camera: camera.clone(),
+    width: width,
+    height: height,
+    cameraFar: camera.far,
+  });
   // 3. Optional: render depth visualization quad to canvas
   // NOTE: We should avoid rendering in production to save some time
   if (debugDepthFrame) {
@@ -938,6 +952,23 @@ async function main() {
       while (currentPathPending) {
         await new Promise((_resolve) => setTimeout(_resolve, PATH_WAIT_DELAY_IN_MS));
       }
+
+      // -------------------------------------------------------------
+      // Path finished – compute and emit overlap matrix 
+      // -------------------------------------------------------------
+      if (currentPathFrames.length > 1) {
+        const overlapMatrix = computeOverlapMatrix(currentPathFrames as FrameInfo[]);
+        saveOverlapMatrix(overlapMatrix, currentPathNumber);
+        console.log(
+          `${MESSAGE_TYPES.OVERLAP_MATRIX_READY}_${JSON.stringify({
+            pathNumber: currentPathNumber,
+            overlapMatrix: overlapMatrix,
+          })}`
+        );
+      }
+
+      // Clear for the next path
+      currentPathFrames = [];
     } else {
       currentPathPending = false;
     }
@@ -951,3 +982,109 @@ async function main() {
 }
 
 main();
+
+// ---------------------------------------------------------------------------
+// Overlap-measurement
+// ---------------------------------------------------------------------------
+const OVERLAP_SAMPLE_STEP = 8; // sample every Nth pixel when computing overlap
+const OVERLAP_EPSILON_METERS = 0.5; // tolerance when checking occlusion in camera B
+
+type FrameInfo = {
+  depthMatrix: number[][]; // [row][col] – rows are stored bottom→top (same as existing code)
+  camera: PerspectiveCamera; // cloned camera for this frame (contains matrices)
+  width: number;
+  height: number;
+  cameraFar: number;
+};
+
+// Retrieve depth value from our bottom-to-top stored matrix
+function getDepthValue(matrix: number[][], width: number, height: number, x: number, y: number) {
+  // y comes from top-origin coordinate – convert to bottom-origin index used in matrix
+  const rowIndex = height - 1 - y;
+  return matrix[rowIndex][x];
+}
+
+function computeOverlapRatio(a: FrameInfo, b: FrameInfo): number {
+  const { width, height } = a;
+  let overlap = 0;
+  let total = 0;
+
+  // Pre-allocate vectors to avoid GC churn inside loops
+  const vWorld = new Vector3();
+  const vCamB = new Vector3();
+  const v = new Vector3();
+
+  for (let y = 0; y < height; y += OVERLAP_SAMPLE_STEP) {
+    for (let x = 0; x < width; x += OVERLAP_SAMPLE_STEP) {
+      const depthA = getDepthValue(a.depthMatrix, width, height, x, y);
+      if (depthA >= a.cameraFar * 0.999) continue; // skip far-plane / missing data
+
+      // Build NDC for pixel (x,y)
+      const xNdc = (x + 0.5) / width * 2 - 1;
+      const yNdc = 1 - (y + 0.5) / height * 2; // flip Y to match NDC
+      const zNorm = depthA / a.cameraFar; // 0-1
+      const zClip = zNorm * 2 - 1; // convert to clip-space depth (-1..1)
+
+      v.set(xNdc, yNdc, zClip);
+      // Unproject through camera A to world space
+      vWorld.copy(v).unproject(a.camera);
+
+      // Project into camera B
+      const ndcB = vWorld.clone().project(b.camera);
+      if (
+        ndcB.x < -1 || ndcB.x > 1 ||
+        ndcB.y < -1 || ndcB.y > 1 ||
+        ndcB.z < -1 || ndcB.z > 1
+      ) {
+        continue; // outside B frustum
+      }
+
+      // Convert to pixel coords in B
+      const xB = Math.round((ndcB.x + 1) * 0.5 * width);
+      const yB = Math.round((1 - (ndcB.y + 1) * 0.5) * height);
+      if (xB < 0 || xB >= width || yB < 0 || yB >= height) continue;
+
+      const depthB = getDepthValue(b.depthMatrix, width, height, xB, yB);
+      if (depthB >= b.cameraFar * 0.999) continue; // missing data at that pixel
+
+      // Expected depth in B
+      vCamB.copy(vWorld).applyMatrix4(b.camera.matrixWorldInverse);
+      const expectedDepthB = -vCamB.z; // positive distance along view axis
+
+      if (expectedDepthB <= depthB + OVERLAP_EPSILON_METERS) {
+        overlap++;
+      }
+      total++;
+    }
+  }
+
+  return total > 0 ? overlap / total : 0;
+}
+
+function computeOverlapMatrix(frames: FrameInfo[]): number[][] {
+  const n = frames.length;
+  const result: number[][] = Array.from({ length: n }, () => Array(n).fill(0));
+  for (let i = 0; i < n; i++) {
+    result[i][i] = 1; // full overlap with itself
+    for (let j = i + 1; j < n; j++) {
+      const ratio = computeOverlapRatio(frames[i], frames[j]);
+      result[i][j] = ratio;
+      result[j][i] = ratio; // symmetric
+    }
+  }
+  return result;
+}
+
+function saveOverlapMatrix(matrix: number[][], pathNumber: number) {
+  try {
+    const blob = new Blob([JSON.stringify(matrix)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `overlap_matrix_path_${pathNumber}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    console.error('Failed to save overlap matrix:', e);
+  }
+}
