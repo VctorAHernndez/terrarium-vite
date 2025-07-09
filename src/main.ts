@@ -23,8 +23,38 @@ import {
   NearestFilter,
   FloatType,
   TypedArray,
+  TextureLoader,
+  RepeatWrapping,
+  LinearFilter,
+  LinearMipMapLinearFilter,
+  RedFormat,
+  NoColorSpace,
 } from 'three';
-import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
+import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader';
+import {
+  EffectComposer,
+  EffectPass,
+  NormalPass,
+  RenderPass,
+  ToneMappingEffect,
+  ToneMappingMode,
+} from 'postprocessing';
+import {
+  AerialPerspectiveEffect,
+  getSunDirectionECEF,
+  PrecomputedTexturesLoader,
+} from '@takram/three-atmosphere';
+import { CloudsEffect } from '@takram/three-clouds';
+import {
+  CLOUD_SHAPE_DETAIL_TEXTURE_SIZE,
+  CLOUD_SHAPE_TEXTURE_SIZE,
+} from '@takram/three-clouds';
+import {
+  createData3DTextureLoaderClass,
+  parseUint8Array,
+  STBNLoader,
+} from '@takram/three-geospatial';
+import { DitheringEffect, LensFlareEffect } from '@takram/three-geospatial-effects';
 
 import { MESSAGE_TYPES, PATH_STATUS } from './constants.js';
 
@@ -49,6 +79,9 @@ const DEFAULT_CAMERA_FOV_IN_DEGREES = 35;
 let tilesLoading = false;
 let consecutiveMissingIntersections = 0;
 let currentPathPending = false;
+
+// New global variable that will hold our composer so we can access it in animate()
+let composer: EffectComposer | null = null;
 
 type Point = {
   altitude: number;
@@ -89,6 +122,11 @@ function onWindowResize(
   depthTarget.setSize(RENDERER_WIDTH, RENDERER_HEIGHT);
   packedDepthTarget.setSize(RENDERER_WIDTH, RENDERER_HEIGHT);
 
+  // NEW: keep composer in sync
+  if (composer) {
+    composer.setSize(RENDERER_WIDTH, RENDERER_HEIGHT);
+  }
+
   camera.updateProjectionMatrix();
 
   // Use fixed pixel ratio for consistent output.
@@ -105,7 +143,7 @@ function getLookAtPoint(tiles: TilesRenderer, camera: PerspectiveCamera, raycast
   if (intersects.length > 0) {
     const point = intersects[0].point;
     // Convert world position to local position in tiles coordinate system
-    const mat = tiles.group.matrixWorld.clone().invert();
+    const mat = (tiles.group as any).matrixWorld.clone().invert();
     const vec = point.clone().applyMatrix4(mat);
 
     const res = {} as WGS84Point;
@@ -137,7 +175,7 @@ function getGroundDistance(tiles: TilesRenderer, camera: PerspectiveCamera) {
     const point = intersects[0].point;
 
     // Convert world position to local position in tiles coordinate system
-    const mat = tiles.group.matrixWorld.clone().invert();
+    const mat = (tiles.group as any).matrixWorld.clone().invert();
     const vec = point.clone().applyMatrix4(mat);
 
     const res = {} as WGS84Point;
@@ -668,7 +706,11 @@ async function animate(
 
   // First render the normal scene and take the screenshot
   renderer.setRenderTarget(null);
-  renderer.render(scene, camera);
+  if (composer) {
+    composer.render();
+  } else {
+    renderer.render(scene, camera);
+  }
   console.log(`${MESSAGE_TYPES.REGULAR_FRAME_READY}_${JSON.stringify(metadata)}`);
 
   // Wait for Puppeteer to capture the frame,
@@ -726,101 +768,33 @@ async function animate(
     return;
   }
 
-  // Then render depth view and take screenshot
-  // 1. Render scene to depth texture (depthTarget)
-  renderer.setRenderTarget(depthTarget);
-  renderer.render(scene, camera);
-
-  // 2. Pack the depth texture into RGBA8 in a second pass
-  renderer.setRenderTarget(packedDepthTarget);
-  renderer.render(depthScene, depthCamera);
-
-  // TODO: this step is the slowest
-  const buffer = new Uint8Array(RENDERER_WIDTH * RENDERER_HEIGHT * 4);
-  renderer.readRenderTargetPixels(packedDepthTarget, 0, 0, RENDERER_WIDTH, RENDERER_HEIGHT, buffer);
-
-  const matrix = [];
-  for (let y = RENDERER_HEIGHT - 1; y >= 0; y--) {
-    const row = new Array(RENDERER_WIDTH);
-    for (let x = 0; x < RENDERER_WIDTH; x++) {
-      const i = 4 * (y * RENDERER_WIDTH + x);
-      const depthInMeters =
-        decodeDepthFromGrayscaleRGBA(buffer[i], buffer[i + 1], buffer[i + 2], buffer[i + 3]) *
-        camera.far;
-
-      // NOTE: set roundDepthMatrix to 0 to disable rounding
-      row[x] = Math.round(depthInMeters * 10 ** roundDepthMatrix) / 10 ** roundDepthMatrix;
-    }
-    matrix.push(row);
-  }
-
-  // 3. Optional: render depth visualization quad to canvas
-  // NOTE: We should avoid rendering in production to save some time
-  if (debugDepthFrame) {
-    renderer.setRenderTarget(null);
-    renderer.render(depthScene, depthCamera);
-  }
-
-  console.log(
-    `${MESSAGE_TYPES.DEPTH_FRAME_READY}_${JSON.stringify({
-      pathNumber: currentPathNumber,
-      frameIndex: currentFrameIndex,
-      depthMatrix: matrix,
-    })}`
+  // -------------------------------------------------------------
+  // Depth rendering is disabled for debugging (black output fix)
+  // -------------------------------------------------------------
+  requestAnimationFrame(() =>
+    animate(
+      tiles,
+      raycaster,
+      renderer,
+      camera,
+      scene,
+      depthTarget,
+      packedDepthTarget,
+      depthCamera,
+      depthScene,
+      totalPathsCount,
+      currentPathIndex,
+      currentPathNumber,
+      csvUrl,
+      currentPathData,
+      currentFrameIndex + 1,
+      0,
+      debugDepthFrame,
+      roundDepthMatrix
+    )
   );
 
-  // Wait for Puppeteer to capture the frame,
-  // unless we hit a timeout,
-  // in which case we continue to the next frame.
-  try {
-    await new Promise((resolve) => {
-      const messageHandler = (event: MessageEvent) => {
-        // TODO: change to event.type === 'console' && event.detail?.text === MESSAGE_TYPES.REGULAR_FRAME_CAPTURED
-        if (event.data === MESSAGE_TYPES.DEPTH_FRAME_CAPTURED) {
-          window.removeEventListener('message', messageHandler);
-          resolve(undefined);
-        }
-      };
-
-      // Send message to Puppeteer
-      window.addEventListener('message', messageHandler);
-      window.postMessage(MESSAGE_TYPES.DEPTH_FRAME_READY, '*');
-
-      // Make sure to resolve the Promise,
-      // even if the message is never received.
-      setTimeout(() => {
-        // TODO: change to 'console' instead of 'message'
-        window.removeEventListener('message', messageHandler);
-        console.warn('Depth frame capture confirmation timed out');
-        resolve(undefined);
-      }, MESSAGE_DELAY_IN_MS);
-    });
-  } catch (error) {
-    console.error('Error during depth frame capture:', error);
-  } finally {
-    requestAnimationFrame(() =>
-      animate(
-        tiles,
-        raycaster,
-        renderer,
-        camera,
-        scene,
-        depthTarget,
-        packedDepthTarget,
-        depthCamera,
-        depthScene,
-        totalPathsCount,
-        currentPathIndex,
-        currentPathNumber,
-        csvUrl,
-        currentPathData,
-        currentFrameIndex + 1,
-        0,
-        debugDepthFrame,
-        roundDepthMatrix
-      )
-    );
-  }
+  return;
 }
 
 function parseQueryParams() {
@@ -899,6 +873,129 @@ async function main() {
     cameraFar
   );
   const tiles = new TilesRenderer();
+
+  // ----------------------------------
+  // Atmosphere & clouds postprocessing
+  // ----------------------------------
+  // Setup sun and effects AFTER camera is initialised
+  const sunDirection = new Vector3();
+  getSunDirectionECEF(new Date(), sunDirection);
+
+  const aerialPerspective = new AerialPerspectiveEffect(camera);
+  aerialPerspective.sky = true;
+  aerialPerspective.sunIrradiance = true;
+  aerialPerspective.skyIrradiance = true;
+  aerialPerspective.sunDirection.copy(sunDirection);
+
+  const clouds = new CloudsEffect(camera);
+  clouds.sunDirection.copy(sunDirection);
+
+  const normalPass = new NormalPass(scene, camera);
+  aerialPerspective.normalBuffer = normalPass.texture;
+
+  composer = new EffectComposer(renderer, { multisampling: 0 });
+  composer.addPass(new RenderPass(scene, camera));
+  composer.addPass(normalPass);
+  composer.addPass(new EffectPass(camera, clouds, aerialPerspective));
+  composer.addPass(
+    new EffectPass(
+      camera,
+      new LensFlareEffect(),
+      new ToneMappingEffect({ mode: ToneMappingMode.AGX }),
+      new DitheringEffect()
+    )
+  );
+
+  // --------------------------------------------------
+  // Load pre-computed lookup textures (sky & clouds)
+  // --------------------------------------------------
+
+  const basePath = import.meta.env.BASE_URL || '/';
+
+  await new Promise<void>((resolve) => {
+    let remaining = 6; // 1 atmosphere + 5 cloud related
+
+    const done = () => {
+      remaining -= 1;
+      if (remaining === 0) {
+        resolve();
+      }
+    };
+
+    // Atmosphere LUTs
+    new PrecomputedTexturesLoader().load(basePath + 'assets/atmosphere', (textures: any) => {
+      Object.assign(aerialPerspective, textures);
+      Object.assign(clouds, textures);
+      done();
+    });
+
+    // Clouds local weather map
+    new TextureLoader().load(basePath + 'assets/clouds/local_weather.png', (texture) => {
+      texture.minFilter = LinearMipMapLinearFilter;
+      texture.magFilter = LinearFilter;
+      texture.wrapS = RepeatWrapping;
+      texture.wrapT = RepeatWrapping;
+      texture.colorSpace = NoColorSpace as any;
+      texture.needsUpdate = true;
+      clouds.localWeatherTexture = texture;
+      done();
+    });
+
+    // Clouds shape volume
+    new (createData3DTextureLoaderClass(parseUint8Array, {
+      width: CLOUD_SHAPE_TEXTURE_SIZE,
+      height: CLOUD_SHAPE_TEXTURE_SIZE,
+      depth: CLOUD_SHAPE_TEXTURE_SIZE,
+    }))().load(basePath + 'assets/clouds/shape.bin', (texture: any) => {
+      texture.format = RedFormat;
+      texture.minFilter = LinearFilter;
+      texture.magFilter = LinearFilter;
+      texture.wrapS = texture.wrapT = texture.wrapR = RepeatWrapping;
+      texture.colorSpace = NoColorSpace as any;
+      texture.needsUpdate = true;
+      clouds.shapeTexture = texture;
+      done();
+    });
+
+    // Clouds shape detail volume
+    new (createData3DTextureLoaderClass(parseUint8Array, {
+      width: CLOUD_SHAPE_DETAIL_TEXTURE_SIZE,
+      height: CLOUD_SHAPE_DETAIL_TEXTURE_SIZE,
+      depth: CLOUD_SHAPE_DETAIL_TEXTURE_SIZE,
+    }))().load(basePath + 'assets/clouds/shape_detail.bin', (texture: any) => {
+      texture.format = RedFormat;
+      texture.minFilter = LinearFilter;
+      texture.magFilter = LinearFilter;
+      texture.wrapS = texture.wrapT = texture.wrapR = RepeatWrapping;
+      texture.colorSpace = NoColorSpace as any;
+      texture.needsUpdate = true;
+      clouds.shapeDetailTexture = texture;
+      done();
+    });
+
+    // Clouds turbulence map
+    new TextureLoader().load(basePath + 'assets/clouds/turbulence.png', (texture) => {
+      texture.minFilter = LinearMipMapLinearFilter;
+      texture.magFilter = LinearFilter;
+      texture.wrapS = RepeatWrapping;
+      texture.wrapT = RepeatWrapping;
+      texture.colorSpace = NoColorSpace as any;
+      texture.needsUpdate = true;
+      clouds.turbulenceTexture = texture;
+      done();
+    });
+
+    // STBN blue-noise (shared by both effects)
+    new STBNLoader().load(basePath + 'assets/core/stbn.bin', (texture: any) => {
+      aerialPerspective.stbnTexture = texture;
+      clouds.stbnTexture = texture;
+      done();
+    });
+  });
+
+  // --------------------------------------------------
+  // Assets are ready – continue normal execution
+  // --------------------------------------------------
 
   const { depthTarget, packedDepthTarget, depthScene, depthCamera } = setupDepthRendering(
     cameraNear,
