@@ -23,6 +23,11 @@ import {
   NearestFilter,
   FloatType,
   TypedArray,
+  DataTexture,
+  LinearFilter,
+  RGBAFormat,
+  UnsignedByteType,
+  Matrix4,
 } from 'three';
 import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 
@@ -707,8 +712,14 @@ async function animate(
   // -------------------------------------------------------------------
   // Store data required for overlap computation
   // -------------------------------------------------------------------
+  const depthTex = new DataTexture(buffer, width, height, RGBAFormat, UnsignedByteType);
+  depthTex.flipY = true;
+  depthTex.minFilter = LinearFilter;
+  depthTex.magFilter = LinearFilter;
+  depthTex.needsUpdate = true;
+
   currentPathFrames.push({
-    depthMatrix: matrix,
+    depthTexture: depthTex,
     camera: camera.clone(),
     width: width,
     height: height,
@@ -954,17 +965,41 @@ async function main() {
       }
 
       // -------------------------------------------------------------
-      // Path finished – compute and emit overlap matrix 
+      // Path finished – compute and emit coviz matrix 
       // -------------------------------------------------------------
       if (currentPathFrames.length > 1) {
-        const overlapMatrix = computeOverlapMatrix(currentPathFrames as FrameInfo[]);
-        saveOverlapMatrix(overlapMatrix, currentPathNumber);
+        const covizMatrix = computeCovizMatrix(currentPathFrames as FrameInfo[], renderer);
+        saveCovizMatrix(covizMatrix, currentPathNumber);
+
         console.log(
-          `${MESSAGE_TYPES.OVERLAP_MATRIX_READY}_${JSON.stringify({
+          `${MESSAGE_TYPES.COVIZ_MATRIX_READY}_${JSON.stringify({
             pathNumber: currentPathNumber,
-            overlapMatrix: overlapMatrix,
+            covizMatrix: covizMatrix,
           })}`
         );
+
+        // Notify puppeteer via postMessage and wait for confirmation
+        try {
+          await new Promise((resolve) => {
+            const handler = (event: MessageEvent) => {
+              if (event.data === MESSAGE_TYPES.COVIZ_MATRIX_CAPTURED) {
+                window.removeEventListener('message', handler);
+                resolve(undefined);
+              }
+            };
+
+            window.addEventListener('message', handler);
+            window.postMessage(MESSAGE_TYPES.COVIZ_MATRIX_READY, '*');
+
+            setTimeout(() => {
+              window.removeEventListener('message', handler);
+              console.warn('Coviz matrix capture confirmation timed out');
+              resolve(undefined);
+            }, MESSAGE_DELAY_IN_MS);
+          });
+        } catch (e) {
+          console.error('Error waiting for coviz matrix capture confirmation:', e);
+        }
       }
 
       // Clear for the next path
@@ -984,13 +1019,13 @@ async function main() {
 main();
 
 // ---------------------------------------------------------------------------
-// Overlap-measurement
+// Coviz-measurement
 // ---------------------------------------------------------------------------
 const OVERLAP_SAMPLE_STEP = 8; // sample every Nth pixel when computing overlap
 const OVERLAP_EPSILON_METERS = 0.5; // tolerance when checking occlusion in camera B
 
 type FrameInfo = {
-  depthMatrix: number[][]; // [row][col] – rows are stored bottom→top (same as existing code)
+  depthTexture: DataTexture; // packed RGBA8 depth
   camera: PerspectiveCamera; // cloned camera for this frame (contains matrices)
   width: number;
   height: number;
@@ -1004,87 +1039,182 @@ function getDepthValue(matrix: number[][], width: number, height: number, x: num
   return matrix[rowIndex][x];
 }
 
-function computeOverlapRatio(a: FrameInfo, b: FrameInfo): number {
-  const { width, height } = a;
-  let overlap = 0;
-  let total = 0;
+// GPU-based overlap computation --------------------------------------------------
 
-  // Pre-allocate vectors to avoid GC churn inside loops
-  const vWorld = new Vector3();
-  const vCamB = new Vector3();
-  const v = new Vector3();
+let overlapResources: {
+  scene: Scene;
+  camera: OrthographicCamera;
+  quad: Mesh;
+  target: WebGLRenderTarget;
+} | null = null;
 
-  for (let y = 0; y < height; y += OVERLAP_SAMPLE_STEP) {
-    for (let x = 0; x < width; x += OVERLAP_SAMPLE_STEP) {
-      const depthA = getDepthValue(a.depthMatrix, width, height, x, y);
-      if (depthA >= a.cameraFar * 0.999) continue; // skip far-plane / missing data
+function initOverlapResources(renderer: WebGLRenderer, width: number, height: number) {
+  const scene = new Scene();
+  const camera = new OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
-      // Build NDC for pixel (x,y)
-      const xNdc = (x + 0.5) / width * 2 - 1;
-      const yNdc = 1 - (y + 0.5) / height * 2; // flip Y to match NDC
-      const zNorm = depthA / a.cameraFar; // 0-1
-      const zClip = zNorm * 2 - 1; // convert to clip-space depth (-1..1)
+  const target = new WebGLRenderTarget(width, height);
+  target.texture.minFilter = LinearFilter;
+  target.texture.magFilter = LinearFilter;
 
-      v.set(xNdc, yNdc, zClip);
-      // Unproject through camera A to world space
-      vWorld.copy(v).unproject(a.camera);
+  const material = new ShaderMaterial({
+    uniforms: {
+      tDepthA: { value: null },
+      tDepthB: { value: null },
+      invPA: { value: new Matrix4() },
+      invVA: { value: new Matrix4() },
+      PB: { value: new Matrix4() },
+      VB: { value: new Matrix4() },
+      farA: { value: 1 },
+      farB: { value: 1 },
+      epsilon: { value: OVERLAP_EPSILON_METERS },
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      void main(){
+        vUv = uv;
+        gl_Position = vec4(position.xy, 0.0, 1.0);
+      }
+    `,
+    fragmentShader: `
+      precision highp float;
+      varying vec2 vUv;
+      uniform sampler2D tDepthA;
+      uniform sampler2D tDepthB;
+      uniform mat4 invPA;
+      uniform mat4 invVA;
+      uniform mat4 PB;
+      uniform mat4 VB;
+      uniform float farA;
+      uniform float farB;
+      uniform float epsilon;
 
-      // Project into camera B
-      const ndcB = vWorld.clone().project(b.camera);
-      if (
-        ndcB.x < -1 || ndcB.x > 1 ||
-        ndcB.y < -1 || ndcB.y > 1 ||
-        ndcB.z < -1 || ndcB.z > 1
-      ) {
-        continue; // outside B frustum
+      // Unpack the packed RGBA8 depth value (0-1 range storing linear depth / far)
+      float unpackDepth( vec4 c ) {
+        return c.r + c.g / 256.0 + c.b / 65536.0 + c.a / 16777216.0;
       }
 
-      // Convert to pixel coords in B
-      const xB = Math.round((ndcB.x + 1) * 0.5 * width);
-      const yB = Math.round((1 - (ndcB.y + 1) * 0.5) * height);
-      if (xB < 0 || xB >= width || yB < 0 || yB >= height) continue;
+      void main() {
+        // ------------------------------------------------------------------
+        // 1. Read linear depth for the current pixel in camera A
+        // ------------------------------------------------------------------
+        float zNormA = unpackDepth( texture2D( tDepthA, vUv ) );
+        if ( zNormA > 0.999 ) {
+          discard;                        // no geometry at far plane
+        }
 
-      const depthB = getDepthValue(b.depthMatrix, width, height, xB, yB);
-      if (depthB >= b.cameraFar * 0.999) continue; // missing data at that pixel
+        // Convert to metric depth (metres)
+        float depthA = zNormA * farA;
 
-      // Expected depth in B
-      vCamB.copy(vWorld).applyMatrix4(b.camera.matrixWorldInverse);
-      const expectedDepthB = -vCamB.z; // positive distance along view axis
+        // ------------------------------------------------------------------
+        // 2. Reconstruct the view-space position for camera A
+        // ------------------------------------------------------------------
+        // Build a ray direction from the camera through this pixel
+        vec2 ndc = vUv * 2.0 - 1.0;         // Normalised device coordinates
+        vec4 clipNear = vec4( ndc, -1.0, 1.0 );
+        vec4 viewNear = invPA * clipNear;   // to view space
+        viewNear /= viewNear.w;
+        vec3 rayDir = normalize( viewNear.xyz );
 
-      if (expectedDepthB <= depthB + OVERLAP_EPSILON_METERS) {
-        overlap++;
+        // View-space position (camera A looks down -Z axis)
+        // depthA is positive; rayDir points toward the scene (negative z),
+        // so we multiply without flipping the sign.
+        vec3 viewPosA = rayDir * depthA;
+
+        // World-space position of this sample
+        vec4 worldPos = invVA * vec4( viewPosA, 1.0 );
+
+        // ------------------------------------------------------------------
+        // 3. Project the point into camera B
+        // ------------------------------------------------------------------
+        vec4 viewPosB4 = VB * worldPos;     // view space B
+        if ( viewPosB4.z >= 0.0 ) {
+          discard;                          // behind camera B
+        }
+
+        vec4 clipB = PB * viewPosB4;
+        if ( clipB.w <= 0.0 ) {
+          discard;
+        }
+
+        vec3 ndcB = clipB.xyz / clipB.w;
+        if ( abs( ndcB.x ) > 1.0 || abs( ndcB.y ) > 1.0 || ndcB.z < 0.0 || ndcB.z > 1.0 ) {
+          discard;                          // outside frustum B
+        }
+
+        vec2 uvB = ndcB.xy * 0.5 + 0.5;
+
+        // ------------------------------------------------------------------
+        // 4. Depth test in camera B (linear space)
+        // ------------------------------------------------------------------
+        float zNormB = unpackDepth( texture2D( tDepthB, uvB ) );
+        float depthPixelB = zNormB * farB;      // surface depth in B for this pixel
+        float depthSampleB = -viewPosB4.z;      // depth of our sample in B
+
+        if ( depthSampleB <= depthPixelB + epsilon ) {
+          // Visible from both cameras -> overlap
+          gl_FragColor = vec4( 1.0, 0.0, 0.0, 1.0 );
+        } else {
+          gl_FragColor = vec4( 0.0, 0.0, 0.0, 1.0 );
+        }
       }
-      total++;
-    }
-  }
+    `,
+  });
 
-  return total > 0 ? overlap / total : 0;
+  const quad = new Mesh(new PlaneGeometry(2, 2), material);
+  scene.add(quad);
+
+  overlapResources = { scene, camera, quad, target };
 }
 
-function computeOverlapMatrix(frames: FrameInfo[]): number[][] {
+function gpuOverlap(renderer: WebGLRenderer, a: FrameInfo, b: FrameInfo): number {
+  if (!overlapResources || overlapResources.target.width !== a.width || overlapResources.target.height !== a.height) {
+    initOverlapResources(renderer, a.width, a.height);
+  }
+
+  const { scene, camera, quad, target } = overlapResources!;
+
+  const mat = quad.material as ShaderMaterial;
+  mat.uniforms.tDepthA.value = a.depthTexture;
+  mat.uniforms.tDepthB.value = b.depthTexture;
+  mat.uniforms.invPA.value = a.camera.projectionMatrixInverse.clone();
+  mat.uniforms.invVA.value = a.camera.matrixWorldInverse.clone().invert();
+  mat.uniforms.PB.value = b.camera.projectionMatrix.clone();
+  mat.uniforms.VB.value = b.camera.matrixWorldInverse.clone();
+  mat.uniforms.farA.value = a.cameraFar;
+  mat.uniforms.farB.value = b.cameraFar;
+
+  renderer.setRenderTarget(target);
+  renderer.render(scene, camera);
+
+  const buffer = new Uint8Array(a.width * a.height * 4);
+  renderer.readRenderTargetPixels(target, 0, 0, a.width, a.height, buffer);
+
+  let overlapCount = 0;
+  for (let i = 0; i < buffer.length; i += 4) {
+    if (buffer[i] > 128) overlapCount++;
+  }
+  const total = a.width * a.height;
+  renderer.setRenderTarget(null);
+  return overlapCount / total;
+}
+
+function computeCovizMatrix(frames: FrameInfo[], renderer: WebGLRenderer): number[][] {
   const n = frames.length;
   const result: number[][] = Array.from({ length: n }, () => Array(n).fill(0));
   for (let i = 0; i < n; i++) {
-    result[i][i] = 1; // full overlap with itself
+    result[i][i] = 1;
     for (let j = i + 1; j < n; j++) {
-      const ratio = computeOverlapRatio(frames[i], frames[j]);
+      const ratio = gpuOverlap(renderer, frames[i], frames[j]);
       result[i][j] = ratio;
-      result[j][i] = ratio; // symmetric
+      result[j][i] = ratio;
     }
   }
   return result;
 }
 
-function saveOverlapMatrix(matrix: number[][], pathNumber: number) {
-  try {
-    const blob = new Blob([JSON.stringify(matrix)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `overlap_matrix_path_${pathNumber}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-  } catch (e) {
-    console.error('Failed to save overlap matrix:', e);
-  }
+function saveCovizMatrix(matrix: number[][], _pathNumber: number) {
+  // Intentionally left blank: avoid triggering a browser download.
+  // Puppeteer will capture the coviz matrix through the
+  // COVIZ_MATRIX_READY console and postMessage events.
+  console.debug('Coviz matrix generated', matrix);
 }
