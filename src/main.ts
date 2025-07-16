@@ -968,7 +968,7 @@ async function main() {
       // Path finished – compute and emit coviz matrix 
       // -------------------------------------------------------------
       if (currentPathFrames.length > 1) {
-        const covizMatrix = computeCovizMatrix(currentPathFrames as FrameInfo[], renderer);
+        const covizMatrix = computeCovizMatrix(currentPathFrames as FrameInfo[], renderer, currentPathNumber);
         saveCovizMatrix(covizMatrix, currentPathNumber);
 
         console.log(
@@ -1198,15 +1198,38 @@ function gpuOverlap(renderer: WebGLRenderer, a: FrameInfo, b: FrameInfo): number
   return overlapCount / total;
 }
 
-function computeCovizMatrix(frames: FrameInfo[], renderer: WebGLRenderer): number[][] {
+function computeCovizMatrix(
+  frames: FrameInfo[],
+  renderer: WebGLRenderer,
+  pathNumber: number        // new param so we can report which path
+) {
   const n = frames.length;
-  const result: number[][] = Array.from({ length: n }, () => Array(n).fill(0));
+  const totalPairs = (n * (n - 1)) / 2;
+  let donePairs = 0;
+
+  const result = Array.from({ length: n }, () => Array(n).fill(0));
+
   for (let i = 0; i < n; i++) {
     result[i][i] = 1;
     for (let j = i + 1; j < n; j++) {
       const ratio = gpuOverlap(renderer, frames[i], frames[j]);
       result[i][j] = ratio;
       result[j][i] = ratio;
+
+      // ---------------------------------
+      // Progress update every 50 pairs
+      // ---------------------------------
+      donePairs++;
+      if (donePairs % 50 === 0 || donePairs === totalPairs) {
+        const progress = donePairs / totalPairs; // 0-1
+        const payload = { pathNumber, progress };
+
+        // a) console prefix (Puppeteer sees it via page.on('console'))
+        console.log(`${MESSAGE_TYPES.COVIZ_MATRIX_PROGRESS}_${JSON.stringify(payload)}`);
+
+        // b) postMessage in case you prefer the window channel
+        window.postMessage(MESSAGE_TYPES.COVIZ_MATRIX_PROGRESS, '*');
+      }
     }
   }
   return result;
