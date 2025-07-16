@@ -465,12 +465,13 @@ function gpuOverlap(
   material.uniforms.farA.value = a.cameraFar;
   material.uniforms.farB.value = b.cameraFar;
 
+  const totalPixels = a.width * a.height;
+
   // ------------------------------------------------------------------
   // 1. Try native WebGL2 occlusion query TODO: DISABLED FOR NOW
   // ------------------------------------------------------------------
   // const gl: WebGLRenderingContext | WebGL2RenderingContext = renderer.getContext();
   // const isWebGL2 = (gl as WebGL2RenderingContext).beginQuery !== undefined;
-  let passedSamples: number | null = null;
 
   // if (isWebGL2) {
   //   const gl2 = gl as WebGL2RenderingContext;
@@ -486,14 +487,16 @@ function gpuOverlap(
   //     while (!gl2.getQueryParameter(query, gl2.QUERY_RESULT_AVAILABLE)) {
   //       /* spin */
   //     }
-  //     passedSamples = gl2.getQueryParameter(query, gl2.QUERY_RESULT);
+  //     const passedSamples = gl2.getQueryParameter(query, gl2.QUERY_RESULT) as number;
   //     gl2.deleteQuery(query);
   //     renderer.setRenderTarget(null);
+
+  //     return passedSamples / totalPixels;
   //   }
   // }
 
   // ------------------------------------------------------------------
-  // 2. WebGL1 fall-back using EXT_occlusion_query_boolean
+  // 2. WebGL1 fall-back using EXT_occlusion_query_boolean TODO: DISABLED FOR NOW
   // ------------------------------------------------------------------
   // if (passedSamples === null) {
   //   // Either WebGL2 path was unavailable or failed → try extension
@@ -509,32 +512,31 @@ function gpuOverlap(
   //     while (!ext.getQueryObjectEXT(queryExt, ext.QUERY_RESULT_AVAILABLE_EXT)) {
   //       /* spin */
   //     }
-  //     passedSamples = ext.getQueryObjectEXT(queryExt, ext.QUERY_RESULT_EXT);
+
+  //     const passedSamples = ext.getQueryObjectEXT(queryExt, ext.QUERY_RESULT_EXT);
   //     ext.deleteQueryEXT(queryExt);
   //     renderer.setRenderTarget(null);
+
+  //     return passedSamples / totalPixels;
   //   }
   // }
+
   // ------------------------------------------------------------------
   // 3. Final fall-back → original readPixels implementation
   // ------------------------------------------------------------------
-  if (passedSamples === null) {
-    renderer.setRenderTarget(overlapRenderTarget);
-    renderer.render(overlapScene, overlapCamera);
+  renderer.setRenderTarget(overlapRenderTarget);
+  renderer.render(overlapScene, overlapCamera);
 
-    const buffer = new Uint8Array(a.width * a.height * 4);
-    renderer.readRenderTargetPixels(overlapRenderTarget, 0, 0, a.width, a.height, buffer);
-    renderer.setRenderTarget(null);
+  const buffer = new Uint8Array(a.width * a.height * 4);
+  renderer.readRenderTargetPixels(overlapRenderTarget, 0, 0, a.width, a.height, buffer);
+  renderer.setRenderTarget(null);
 
-    let count = 0;
-    for (let i = 0; i < buffer.length; i += 4) {
-      if (buffer[i] > 128) count++;
-    }
-    passedSamples = count;
+  let passedSamples = 0;
+  for (let i = 0; i < buffer.length; i += 4) {
+    if (buffer[i] > 128) passedSamples++;
   }
 
-  const totalPixels = a.width * a.height;
   return passedSamples / totalPixels;
-
 }
 
 function computeCovizMatrix(
