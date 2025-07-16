@@ -1171,9 +1171,7 @@ function gpuOverlap(
   a: FrameInfo,
   b: FrameInfo
 ): number {
-  // ... existing code before the function body ...
-// ... existing code ...
-// Replace everything inside the function with a capability-checked implementation
+  
   if (!overlapResources ||
       overlapResources.target.width  !== a.width ||
       overlapResources.target.height !== a.height) {
@@ -1182,16 +1180,18 @@ function gpuOverlap(
 
   const { scene, camera, quad, target } = overlapResources!;
 
+  
   // Update uniforms for this pair
   const mat = quad.material as ShaderMaterial;
   mat.uniforms.tDepthA.value = a.depthTexture;
   mat.uniforms.tDepthB.value = b.depthTexture;
-  mat.uniforms.invPA.value   = a.camera.projectionMatrixInverse;
-  mat.uniforms.invVA.value   = a.camera.matrixWorld;           // world matrix (== inverse of view)
-  mat.uniforms.PB.value      = b.camera.projectionMatrix;
-  mat.uniforms.VB.value      = b.camera.matrixWorldInverse;
-  mat.uniforms.farA.value    = a.cameraFar;
-  mat.uniforms.farB.value    = b.cameraFar;
+  mat.uniforms.invPA.value = a.camera.projectionMatrixInverse.clone();
+  mat.uniforms.invVA.value = a.camera.matrixWorldInverse.clone().invert();
+  mat.uniforms.PB.value = b.camera.projectionMatrix.clone();
+  mat.uniforms.VB.value = b.camera.matrixWorldInverse.clone();
+  mat.uniforms.farA.value = a.cameraFar;
+  mat.uniforms.farB.value = b.cameraFar;
+
 
   // ------------------------------------------------------------------
   // 1. Try native WebGL2 occlusion query
@@ -1201,57 +1201,60 @@ function gpuOverlap(
   const isWebGL2 = (gl as WebGL2RenderingContext).beginQuery !== undefined;
   let passedSamples: number | null = null;
 
-  if (isWebGL2) {
-    const gl2 = gl as WebGL2RenderingContext;
-    const query = gl2.createQuery();
-    if (query) {
-      renderer.setRenderTarget(target);
-      gl2.beginQuery(gl2.ANY_SAMPLES_PASSED, query);
-      renderer.render(scene, camera);
-      gl2.endQuery(gl2.ANY_SAMPLES_PASSED);
-      gl2.flush(); // ensure the commands are submitted
+  // if (isWebGL2) {
+  //   const gl2 = gl as WebGL2RenderingContext;
+  //   const query = gl2.createQuery();
+  //   if (query) {
+  //     renderer.setRenderTarget(target);
+  //     gl2.beginQuery(gl2.ANY_SAMPLES_PASSED, query);
+  //     renderer.render(scene, camera);
+  //     gl2.endQuery(gl2.ANY_SAMPLES_PASSED);
+  //     gl2.flush(); // ensure the commands are submitted
 
-      // Busy-wait until the result is ready. In practice this returns quickly.
-      while (!gl2.getQueryParameter(query, gl2.QUERY_RESULT_AVAILABLE)) {
-        /* spin */
-      }
-      passedSamples = gl2.getQueryParameter(query, gl2.QUERY_RESULT);
-      gl2.deleteQuery(query);
-      renderer.setRenderTarget(null);
-    }
-  }
+  //     // Busy-wait until the result is ready. In practice this returns quickly.
+  //     while (!gl2.getQueryParameter(query, gl2.QUERY_RESULT_AVAILABLE)) {
+  //       /* spin */
+  //     }
+  //     passedSamples = gl2.getQueryParameter(query, gl2.QUERY_RESULT);
+  //     gl2.deleteQuery(query);
+  //     renderer.setRenderTarget(null);
+  //   }
+  // }
 
   // ------------------------------------------------------------------
   // 2. WebGL1 fall-back using EXT_occlusion_query_boolean
   // ------------------------------------------------------------------
-  if (passedSamples === null) {
-    // Either WebGL2 path was unavailable or failed → try extension
-    const ext: any = gl.getExtension('EXT_occlusion_query_boolean');
-    if (ext) {
-      const queryExt = ext.createQueryEXT();
-      renderer.setRenderTarget(target);
-      ext.beginQueryEXT(ext.ANY_SAMPLES_PASSED_EXT, queryExt);
-      renderer.render(scene, camera);
-      ext.endQueryEXT(ext.ANY_SAMPLES_PASSED_EXT);
-      (gl as WebGLRenderingContext).flush();
+  // if (passedSamples === null) {
+  //   // Either WebGL2 path was unavailable or failed → try extension
+  //   const ext: any = gl.getExtension('EXT_occlusion_query_boolean');
+  //   if (ext) {
+  //     const queryExt = ext.createQueryEXT();
+  //     renderer.setRenderTarget(target);
+  //     ext.beginQueryEXT(ext.ANY_SAMPLES_PASSED_EXT, queryExt);
+  //     renderer.render(scene, camera);
+  //     ext.endQueryEXT(ext.ANY_SAMPLES_PASSED_EXT);
+  //     (gl as WebGLRenderingContext).flush();
 
-      while (!ext.getQueryObjectEXT(queryExt, ext.QUERY_RESULT_AVAILABLE_EXT)) {
-        /* spin */
-      }
-      passedSamples = ext.getQueryObjectEXT(queryExt, ext.QUERY_RESULT_EXT);
-      ext.deleteQueryEXT(queryExt);
-      renderer.setRenderTarget(null);
-    }
-  }
+  //     while (!ext.getQueryObjectEXT(queryExt, ext.QUERY_RESULT_AVAILABLE_EXT)) {
+  //       /* spin */
+  //     }
+  //     passedSamples = ext.getQueryObjectEXT(queryExt, ext.QUERY_RESULT_EXT);
+  //     ext.deleteQueryEXT(queryExt);
+  //     renderer.setRenderTarget(null);
+  //   }
+  // }
 
   // ------------------------------------------------------------------
-  // 3. Final fall-back → original readPixels implementation
+  // 3. Final fall-back → original readPixels implementation (counts per-pixel overlap)
   // ------------------------------------------------------------------
-  if (passedSamples === null) {
+  const totalPixels = a.width * a.height;
+
+  // Helper that performs the slower pixel read-back and explicit counting
+  const countPixelsFallback = (): number => {
     renderer.setRenderTarget(target);
     renderer.render(scene, camera);
 
-    const buffer = new Uint8Array(a.width * a.height * 4);
+    const buffer = new Uint8Array(totalPixels * 4);
     renderer.readRenderTargetPixels(target, 0, 0, a.width, a.height, buffer);
     renderer.setRenderTarget(null);
 
@@ -1259,10 +1262,16 @@ function gpuOverlap(
     for (let i = 0; i < buffer.length; i += 4) {
       if (buffer[i] > 128) count++;
     }
-    passedSamples = count;
+    return count;
+  };
+
+  // If the occlusion query gave us no result, or only a boolean (0 / 1) that
+  // is clearly insufficient for a coverage ratio, fall back to the explicit
+  // pixel counting method.
+  if (passedSamples === null || passedSamples <= 1) {
+    passedSamples = countPixelsFallback();
   }
 
-  const totalPixels = a.width * a.height;
   return passedSamples / totalPixels;
 }
 
