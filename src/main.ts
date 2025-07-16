@@ -22,7 +22,6 @@ import {
   DepthTexture,
   NearestFilter,
   FloatType,
-  TypedArray,
   DataTexture,
   LinearFilter,
   RGBAFormat,
@@ -49,6 +48,9 @@ const DEFAULT_CAMERA_FAR_IN_METERS = 100000;
 const DEFAULT_CAMERA_NEAR_IN_METERS = 1;
 const DEFAULT_CAMERA_FOV_IN_DEGREES = 35;
 
+// Tolerance when checking occlusion in camera B
+const OVERLAP_EPSILON_METERS = 0.5;
+
 // Global flags
 let tilesLoading = false;
 let consecutiveMissingIntersections = 0;
@@ -73,6 +75,15 @@ type WGS84Point = {
   height: number;
   lat: number;
   lon: number;
+};
+
+// Type for the data we need to compute the overlap matrix
+type FrameInfo = {
+  dataTexture: DataTexture; // packed RGBA8 depth
+  camera: PerspectiveCamera; // cloned camera for this frame (contains matrices)
+  width: number;
+  height: number;
+  cameraFar: number;
 };
 
 function decodeDepthFromGrayscaleRGBA(r: number, g: number, b: number, a: number) {
@@ -309,6 +320,293 @@ function setupDepthRendering(width: number, height: number, cameraNear: number, 
     depthCamera,
     shaderMaterial,
   };
+}
+
+function setupOverlapResources(width: number, height: number) {
+  const overlapScene = new Scene();
+  const overlapCamera = new OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+  const overlapRenderTarget = new WebGLRenderTarget(width, height);
+  overlapRenderTarget.texture.minFilter = LinearFilter;
+  overlapRenderTarget.texture.magFilter = LinearFilter;
+
+  const material = new ShaderMaterial({
+    uniforms: {
+      tDepthA: { value: null },
+      tDepthB: { value: null },
+      invPA: { value: new Matrix4() },
+      invVA: { value: new Matrix4() },
+      PB: { value: new Matrix4() },
+      VB: { value: new Matrix4() },
+      farA: { value: 1 },
+      farB: { value: 1 },
+      epsilon: { value: OVERLAP_EPSILON_METERS },
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      void main(){
+        vUv = uv;
+        gl_Position = vec4(position.xy, 0.0, 1.0);
+      }
+    `,
+    fragmentShader: `
+      precision highp float;
+      varying vec2 vUv;
+      uniform sampler2D tDepthA;
+      uniform sampler2D tDepthB;
+      uniform mat4 invPA;
+      uniform mat4 invVA;
+      uniform mat4 PB;
+      uniform mat4 VB;
+      uniform float farA;
+      uniform float farB;
+      uniform float epsilon;
+
+      // Unpack the packed RGBA8 depth value (0-1 range storing linear depth / far)
+      float unpackDepth( vec4 c ) {
+        return c.r + c.g / 256.0 + c.b / 65536.0 + c.a / 16777216.0;
+      }
+
+      void main() {
+        // ------------------------------------------------------------------
+        // 1. Read linear depth for the current pixel in camera A
+        // ------------------------------------------------------------------
+        float zNormA = unpackDepth( texture2D( tDepthA, vUv ) );
+        if ( zNormA > 0.999 ) {
+          discard;                        // no geometry at far plane
+        }
+
+        // Convert to metric depth (metres)
+        float depthA = zNormA * farA;
+
+        // ------------------------------------------------------------------
+        // 2. Reconstruct the view-space position for camera A
+        // ------------------------------------------------------------------
+        // Build a ray direction from the camera through this pixel
+        vec2 ndc = vUv * 2.0 - 1.0;         // Normalised device coordinates
+        vec4 clipNear = vec4( ndc, -1.0, 1.0 );
+        vec4 viewNear = invPA * clipNear;   // to view space
+        viewNear /= viewNear.w;
+        vec3 rayDir = normalize( viewNear.xyz );
+
+        // View-space position (camera A looks down -Z axis)
+        // depthA is positive; rayDir points toward the scene (negative z),
+        // so we multiply without flipping the sign.
+        vec3 viewPosA = rayDir * depthA;
+
+        // World-space position of this sample
+        vec4 worldPos = invVA * vec4( viewPosA, 1.0 );
+
+        // ------------------------------------------------------------------
+        // 3. Project the point into camera B
+        // ------------------------------------------------------------------
+        vec4 viewPosB4 = VB * worldPos;     // view space B
+        if ( viewPosB4.z >= 0.0 ) {
+          discard;                          // behind camera B
+        }
+
+        vec4 clipB = PB * viewPosB4;
+        if ( clipB.w <= 0.0 ) {
+          discard;
+        }
+
+        vec3 ndcB = clipB.xyz / clipB.w;
+        if ( abs( ndcB.x ) > 1.0 || abs( ndcB.y ) > 1.0 || ndcB.z < 0.0 || ndcB.z > 1.0 ) {
+          discard;                          // outside frustum B
+        }
+
+        vec2 uvB = ndcB.xy * 0.5 + 0.5;
+
+        // ------------------------------------------------------------------
+        // 4. Depth test in camera B (linear space)
+        // ------------------------------------------------------------------
+        float zNormB = unpackDepth( texture2D( tDepthB, uvB ) );
+        float depthPixelB = zNormB * farB;      // surface depth in B for this pixel
+        float depthSampleB = -viewPosB4.z;      // depth of our sample in B
+
+        if ( depthSampleB <= depthPixelB + epsilon ) {
+          // Visible from both cameras -> overlap
+          gl_FragColor = vec4( 1.0, 0.0, 0.0, 1.0 );
+        } else {
+          gl_FragColor = vec4( 0.0, 0.0, 0.0, 1.0 );
+        }
+      }
+    `,
+  });
+
+  const overlapQuad = new Mesh(new PlaneGeometry(2, 2), material);
+  overlapScene.add(overlapQuad);
+
+  return { overlapScene, overlapCamera, overlapQuad, overlapRenderTarget };
+}
+
+function gpuOverlap(
+  renderer: WebGLRenderer,
+  overlapScene: Scene,
+  overlapCamera: OrthographicCamera,
+  overlapQuad: Mesh,
+  overlapRenderTarget: WebGLRenderTarget,
+  a: FrameInfo,
+  b: FrameInfo
+): number {
+  if (overlapRenderTarget.width !== a.width || overlapRenderTarget.height !== a.height) {
+    throw new Error(
+      `Overlap resources not initialized (width: ${overlapRenderTarget.width}, height: ${overlapRenderTarget.height}, expected: ${a.width}x${a.height})`
+    );
+  }
+
+  const material = overlapQuad.material as ShaderMaterial;
+  material.uniforms.tDepthA.value = a.dataTexture;
+  material.uniforms.tDepthB.value = b.dataTexture;
+  material.uniforms.invPA.value = a.camera.projectionMatrixInverse;
+  material.uniforms.invVA.value = a.camera.matrixWorld; // world matrix (== inverse of view)
+  material.uniforms.PB.value = b.camera.projectionMatrix;
+  material.uniforms.VB.value = b.camera.matrixWorldInverse;
+  material.uniforms.farA.value = a.cameraFar;
+  material.uniforms.farB.value = b.cameraFar;
+
+  // ------------------------------------------------------------------
+  // 1. Try native WebGL2 occlusion query
+  // ------------------------------------------------------------------
+  const gl: WebGLRenderingContext | WebGL2RenderingContext = renderer.getContext();
+  const isWebGL2 = (gl as WebGL2RenderingContext).beginQuery !== undefined;
+  let passedSamples: number | null = null;
+
+  if (isWebGL2) {
+    const gl2 = gl as WebGL2RenderingContext;
+    const query = gl2.createQuery();
+    if (query) {
+      renderer.setRenderTarget(overlapRenderTarget);
+      gl2.beginQuery(gl2.ANY_SAMPLES_PASSED, query);
+      renderer.render(overlapScene, overlapCamera);
+      gl2.endQuery(gl2.ANY_SAMPLES_PASSED);
+      gl2.flush(); // ensure the commands are submitted
+
+      // Busy-wait until the result is ready. In practice this returns quickly.
+      while (!gl2.getQueryParameter(query, gl2.QUERY_RESULT_AVAILABLE)) {
+        /* spin */
+      }
+      passedSamples = gl2.getQueryParameter(query, gl2.QUERY_RESULT);
+      gl2.deleteQuery(query);
+      renderer.setRenderTarget(null);
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // 2. WebGL1 fall-back using EXT_occlusion_query_boolean
+  // ------------------------------------------------------------------
+  if (passedSamples === null) {
+    // Either WebGL2 path was unavailable or failed → try extension
+    const ext: any = gl.getExtension('EXT_occlusion_query_boolean');
+    if (ext) {
+      const queryExt = ext.createQueryEXT();
+      renderer.setRenderTarget(overlapRenderTarget);
+      ext.beginQueryEXT(ext.ANY_SAMPLES_PASSED_EXT, queryExt);
+      renderer.render(overlapScene, overlapCamera);
+      ext.endQueryEXT(ext.ANY_SAMPLES_PASSED_EXT);
+      (gl as WebGLRenderingContext).flush();
+
+      while (!ext.getQueryObjectEXT(queryExt, ext.QUERY_RESULT_AVAILABLE_EXT)) {
+        /* spin */
+      }
+      passedSamples = ext.getQueryObjectEXT(queryExt, ext.QUERY_RESULT_EXT);
+      ext.deleteQueryEXT(queryExt);
+      renderer.setRenderTarget(null);
+    }
+  }
+  // ------------------------------------------------------------------
+  // 3. Final fall-back → original readPixels implementation
+  // ------------------------------------------------------------------
+  if (passedSamples === null) {
+    renderer.setRenderTarget(overlapRenderTarget);
+    renderer.render(overlapScene, overlapCamera);
+
+    const buffer = new Uint8Array(a.width * a.height * 4);
+    renderer.readRenderTargetPixels(overlapRenderTarget, 0, 0, a.width, a.height, buffer);
+    renderer.setRenderTarget(null);
+
+    let count = 0;
+    for (let i = 0; i < buffer.length; i += 4) {
+      if (buffer[i] > 128) count++;
+    }
+    passedSamples = count;
+  }
+
+  const totalPixels = a.width * a.height;
+  return passedSamples / totalPixels;
+
+  // renderer.setRenderTarget(overlapRenderTarget);
+  // renderer.render(overlapScene, overlapCamera);
+
+  // const buffer = new Uint8Array(a.width * a.height * 4);
+  // renderer.readRenderTargetPixels(overlapRenderTarget, 0, 0, a.width, a.height, buffer);
+
+  // let overlapCount = 0;
+  // for (let i = 0; i < buffer.length; i += 4) {
+  //   if (buffer[i] > 128) overlapCount++;
+  // }
+
+  // const total = a.width * a.height;
+  // renderer.setRenderTarget(null);
+
+  // return overlapCount / total;
+}
+
+function computeCovizMatrix(
+  frames: FrameInfo[],
+  renderer: WebGLRenderer,
+  overlapScene: Scene,
+  overlapCamera: OrthographicCamera,
+  overlapQuad: Mesh,
+  overlapRenderTarget: WebGLRenderTarget,
+  pathNumber: number
+) {
+  const n = frames.length;
+  const totalPairs = (n * (n - 1)) / 2;
+  let donePairs = 0;
+
+  const result = Array.from({ length: n }, () => Array(n).fill(0));
+
+  for (let i = 0; i < n; i++) {
+    result[i][i] = 1;
+    for (let j = i + 1; j < n; j++) {
+      // Pixels from A also seen by B
+      result[i][j] = gpuOverlap(
+        renderer,
+        overlapScene,
+        overlapCamera,
+        overlapQuad,
+        overlapRenderTarget,
+        frames[i],
+        frames[j]
+      );
+
+      // Pixels from B also seen by A
+      result[j][i] = gpuOverlap(
+        renderer,
+        overlapScene,
+        overlapCamera,
+        overlapQuad,
+        overlapRenderTarget,
+        frames[j],
+        frames[i]
+      );
+
+      donePairs++;
+
+      // Progress update every 50 pairs
+      if (donePairs % 50 === 0 || donePairs === totalPairs) {
+        console.log(
+          `${MESSAGE_TYPES.COVIZ_MATRIX_PROGRESS}_${JSON.stringify({
+            pathNumber,
+            progress: donePairs / totalPairs,
+          })}`
+        );
+      }
+    }
+  }
+
+  return result;
 }
 
 async function loadPath(currentPathNumber: number, csvUrl: string) {
@@ -712,19 +1010,20 @@ async function animate(
   // -------------------------------------------------------------------
   // Store data required for overlap computation
   // -------------------------------------------------------------------
-  const depthTex = new DataTexture(buffer, width, height, RGBAFormat, UnsignedByteType);
-  depthTex.flipY = true;
-  depthTex.minFilter = LinearFilter;
-  depthTex.magFilter = LinearFilter;
-  depthTex.needsUpdate = true;
+  const dataTexture = new DataTexture(buffer, width, height, RGBAFormat, UnsignedByteType);
+  dataTexture.flipY = true;
+  dataTexture.minFilter = LinearFilter;
+  dataTexture.magFilter = LinearFilter;
+  dataTexture.needsUpdate = true;
 
   currentPathFrames.push({
-    depthTexture: depthTex,
+    dataTexture: dataTexture,
     camera: camera.clone(),
     width: width,
     height: height,
     cameraFar: camera.far,
   });
+
   // 3. Optional: render depth visualization quad to canvas
   // NOTE: We should avoid rendering in production to save some time
   if (debugDepthFrame) {
@@ -909,6 +1208,11 @@ async function main() {
     cameraFar
   );
 
+  const { overlapScene, overlapCamera, overlapQuad, overlapRenderTarget } = setupOverlapResources(
+    width,
+    height
+  );
+
   // TODO: how do we know that the provided token is valid at runtime?
   reinstantiateTiles(tiles, camera, renderer, scene, token);
 
@@ -930,6 +1234,7 @@ async function main() {
     tilesLoading = false;
     consecutiveMissingIntersections = 0;
     currentPathPending = true;
+    currentPathFrames = [];
 
     const currentCsvUrl = csvUrls[currentPathIndex];
     const currentPathNumber = getPathNumberFromCsvUrl(currentCsvUrl);
@@ -964,46 +1269,53 @@ async function main() {
         await new Promise((_resolve) => setTimeout(_resolve, PATH_WAIT_DELAY_IN_MS));
       }
 
-      // -------------------------------------------------------------
-      // Path finished – compute and emit coviz matrix 
-      // -------------------------------------------------------------
-      if (currentPathFrames.length > 1) {
-        const covizMatrix = computeCovizMatrix(currentPathFrames as FrameInfo[], renderer, currentPathNumber);
-        saveCovizMatrix(covizMatrix, currentPathNumber);
-
-        console.log(
-          `${MESSAGE_TYPES.COVIZ_MATRIX_READY}_${JSON.stringify({
-            pathNumber: currentPathNumber,
-            covizMatrix: covizMatrix,
-          })}`
-        );
-
-        // Notify puppeteer via postMessage and wait for confirmation
-        try {
-          await new Promise((resolve) => {
-            const handler = (event: MessageEvent) => {
-              if (event.data === MESSAGE_TYPES.COVIZ_MATRIX_CAPTURED) {
-                window.removeEventListener('message', handler);
-                resolve(undefined);
-              }
-            };
-
-            window.addEventListener('message', handler);
-            window.postMessage(MESSAGE_TYPES.COVIZ_MATRIX_READY, '*');
-
-            setTimeout(() => {
-              window.removeEventListener('message', handler);
-              console.warn('Coviz matrix capture confirmation timed out');
-              resolve(undefined);
-            }, MESSAGE_DELAY_IN_MS);
-          });
-        } catch (e) {
-          console.error('Error waiting for coviz matrix capture confirmation:', e);
-        }
+      // No need to continue if the path is empty
+      if (currentPathFrames.length === 0) {
+        continue;
       }
 
-      // Clear for the next path
-      currentPathFrames = [];
+      // -------------------------------------------------------------
+      // Path finished – compute and emit coviz matrix
+      // -------------------------------------------------------------
+      const covizMatrix = computeCovizMatrix(
+        currentPathFrames,
+        renderer,
+        overlapScene,
+        overlapCamera,
+        overlapQuad,
+        overlapRenderTarget,
+        currentPathNumber
+      );
+
+      console.log(
+        `${MESSAGE_TYPES.COVIZ_MATRIX_READY}_${JSON.stringify({
+          pathNumber: currentPathNumber,
+          covizMatrix: covizMatrix,
+        })}`
+      );
+
+      // Notify puppeteer via postMessage and wait for confirmation
+      try {
+        await new Promise((resolve) => {
+          const handler = (event: MessageEvent) => {
+            if (event.data === MESSAGE_TYPES.COVIZ_MATRIX_CAPTURED) {
+              window.removeEventListener('message', handler);
+              resolve(undefined);
+            }
+          };
+
+          window.addEventListener('message', handler);
+          window.postMessage(MESSAGE_TYPES.COVIZ_MATRIX_READY, '*');
+
+          setTimeout(() => {
+            window.removeEventListener('message', handler);
+            console.warn('Coviz matrix capture confirmation timed out');
+            resolve(undefined);
+          }, MESSAGE_DELAY_IN_MS);
+        });
+      } catch (e) {
+        console.error('Error waiting for coviz matrix capture confirmation:', e);
+      }
     } else {
       currentPathPending = false;
     }
@@ -1017,298 +1329,3 @@ async function main() {
 }
 
 main();
-
-// ---------------------------------------------------------------------------
-// Coviz-measurement
-// ---------------------------------------------------------------------------
-const OVERLAP_SAMPLE_STEP = 8; // sample every Nth pixel when computing overlap
-const OVERLAP_EPSILON_METERS = 0.5; // tolerance when checking occlusion in camera B
-
-type FrameInfo = {
-  depthTexture: DataTexture; // packed RGBA8 depth
-  camera: PerspectiveCamera; // cloned camera for this frame (contains matrices)
-  width: number;
-  height: number;
-  cameraFar: number;
-};
-
-// Retrieve depth value from our bottom-to-top stored matrix
-function getDepthValue(matrix: number[][], width: number, height: number, x: number, y: number) {
-  // y comes from top-origin coordinate – convert to bottom-origin index used in matrix
-  const rowIndex = height - 1 - y;
-  return matrix[rowIndex][x];
-}
-
-// GPU-based overlap computation --------------------------------------------------
-
-let overlapResources: {
-  scene: Scene;
-  camera: OrthographicCamera;
-  quad: Mesh;
-  target: WebGLRenderTarget;
-} | null = null;
-
-function initOverlapResources(renderer: WebGLRenderer, width: number, height: number) {
-  const scene = new Scene();
-  const camera = new OrthographicCamera(-1, 1, 1, -1, 0, 1);
-
-  const target = new WebGLRenderTarget(width, height);
-  target.texture.minFilter = LinearFilter;
-  target.texture.magFilter = LinearFilter;
-
-  const material = new ShaderMaterial({
-    uniforms: {
-      tDepthA: { value: null },
-      tDepthB: { value: null },
-      invPA: { value: new Matrix4() },
-      invVA: { value: new Matrix4() },
-      PB: { value: new Matrix4() },
-      VB: { value: new Matrix4() },
-      farA: { value: 1 },
-      farB: { value: 1 },
-      epsilon: { value: OVERLAP_EPSILON_METERS },
-    },
-    vertexShader: `
-      varying vec2 vUv;
-      void main(){
-        vUv = uv;
-        gl_Position = vec4(position.xy, 0.0, 1.0);
-      }
-    `,
-    fragmentShader: `
-      precision highp float;
-      varying vec2 vUv;
-      uniform sampler2D tDepthA;
-      uniform sampler2D tDepthB;
-      uniform mat4 invPA;
-      uniform mat4 invVA;
-      uniform mat4 PB;
-      uniform mat4 VB;
-      uniform float farA;
-      uniform float farB;
-      uniform float epsilon;
-
-      // Unpack the packed RGBA8 depth value (0-1 range storing linear depth / far)
-      float unpackDepth( vec4 c ) {
-        return c.r + c.g / 256.0 + c.b / 65536.0 + c.a / 16777216.0;
-      }
-
-      void main() {
-        // ------------------------------------------------------------------
-        // 1. Read linear depth for the current pixel in camera A
-        // ------------------------------------------------------------------
-        float zNormA = unpackDepth( texture2D( tDepthA, vUv ) );
-        if ( zNormA > 0.999 ) {
-          discard;                        // no geometry at far plane
-        }
-
-        // Convert to metric depth (metres)
-        float depthA = zNormA * farA;
-
-        // ------------------------------------------------------------------
-        // 2. Reconstruct the view-space position for camera A
-        // ------------------------------------------------------------------
-        // Build a ray direction from the camera through this pixel
-        vec2 ndc = vUv * 2.0 - 1.0;         // Normalised device coordinates
-        vec4 clipNear = vec4( ndc, -1.0, 1.0 );
-        vec4 viewNear = invPA * clipNear;   // to view space
-        viewNear /= viewNear.w;
-        vec3 rayDir = normalize( viewNear.xyz );
-
-        // View-space position (camera A looks down -Z axis)
-        // depthA is positive; rayDir points toward the scene (negative z),
-        // so we multiply without flipping the sign.
-        vec3 viewPosA = rayDir * depthA;
-
-        // World-space position of this sample
-        vec4 worldPos = invVA * vec4( viewPosA, 1.0 );
-
-        // ------------------------------------------------------------------
-        // 3. Project the point into camera B
-        // ------------------------------------------------------------------
-        vec4 viewPosB4 = VB * worldPos;     // view space B
-        if ( viewPosB4.z >= 0.0 ) {
-          discard;                          // behind camera B
-        }
-
-        vec4 clipB = PB * viewPosB4;
-        if ( clipB.w <= 0.0 ) {
-          discard;
-        }
-
-        vec3 ndcB = clipB.xyz / clipB.w;
-        if ( abs( ndcB.x ) > 1.0 || abs( ndcB.y ) > 1.0 || ndcB.z < 0.0 || ndcB.z > 1.0 ) {
-          discard;                          // outside frustum B
-        }
-
-        vec2 uvB = ndcB.xy * 0.5 + 0.5;
-
-        // ------------------------------------------------------------------
-        // 4. Depth test in camera B (linear space)
-        // ------------------------------------------------------------------
-        float zNormB = unpackDepth( texture2D( tDepthB, uvB ) );
-        float depthPixelB = zNormB * farB;      // surface depth in B for this pixel
-        float depthSampleB = -viewPosB4.z;      // depth of our sample in B
-
-        if ( depthSampleB <= depthPixelB + epsilon ) {
-          // Visible from both cameras -> overlap
-          gl_FragColor = vec4( 1.0, 0.0, 0.0, 1.0 );
-        } else {
-          gl_FragColor = vec4( 0.0, 0.0, 0.0, 1.0 );
-        }
-      }
-    `,
-  });
-
-  const quad = new Mesh(new PlaneGeometry(2, 2), material);
-  scene.add(quad);
-
-  overlapResources = { scene, camera, quad, target };
-}
-
-function gpuOverlap(
-  renderer: WebGLRenderer,
-  a: FrameInfo,
-  b: FrameInfo
-): number {
-  // ... existing code before the function body ...
-// ... existing code ...
-// Replace everything inside the function with a capability-checked implementation
-  if (!overlapResources ||
-      overlapResources.target.width  !== a.width ||
-      overlapResources.target.height !== a.height) {
-    initOverlapResources(renderer, a.width, a.height);
-  }
-
-  const { scene, camera, quad, target } = overlapResources!;
-
-  // Update uniforms for this pair
-  const mat = quad.material as ShaderMaterial;
-  mat.uniforms.tDepthA.value = a.depthTexture;
-  mat.uniforms.tDepthB.value = b.depthTexture;
-  mat.uniforms.invPA.value   = a.camera.projectionMatrixInverse;
-  mat.uniforms.invVA.value   = a.camera.matrixWorld;           // world matrix (== inverse of view)
-  mat.uniforms.PB.value      = b.camera.projectionMatrix;
-  mat.uniforms.VB.value      = b.camera.matrixWorldInverse;
-  mat.uniforms.farA.value    = a.cameraFar;
-  mat.uniforms.farB.value    = b.cameraFar;
-
-  // ------------------------------------------------------------------
-  // 1. Try native WebGL2 occlusion query
-  // ------------------------------------------------------------------
-  const gl: WebGLRenderingContext | WebGL2RenderingContext = renderer.getContext();
-
-  const isWebGL2 = (gl as WebGL2RenderingContext).beginQuery !== undefined;
-  let passedSamples: number | null = null;
-
-  if (isWebGL2) {
-    const gl2 = gl as WebGL2RenderingContext;
-    const query = gl2.createQuery();
-    if (query) {
-      renderer.setRenderTarget(target);
-      gl2.beginQuery(gl2.ANY_SAMPLES_PASSED, query);
-      renderer.render(scene, camera);
-      gl2.endQuery(gl2.ANY_SAMPLES_PASSED);
-      gl2.flush(); // ensure the commands are submitted
-
-      // Busy-wait until the result is ready. In practice this returns quickly.
-      while (!gl2.getQueryParameter(query, gl2.QUERY_RESULT_AVAILABLE)) {
-        /* spin */
-      }
-      passedSamples = gl2.getQueryParameter(query, gl2.QUERY_RESULT);
-      gl2.deleteQuery(query);
-      renderer.setRenderTarget(null);
-    }
-  }
-
-  // ------------------------------------------------------------------
-  // 2. WebGL1 fall-back using EXT_occlusion_query_boolean
-  // ------------------------------------------------------------------
-  if (passedSamples === null) {
-    // Either WebGL2 path was unavailable or failed → try extension
-    const ext: any = gl.getExtension('EXT_occlusion_query_boolean');
-    if (ext) {
-      const queryExt = ext.createQueryEXT();
-      renderer.setRenderTarget(target);
-      ext.beginQueryEXT(ext.ANY_SAMPLES_PASSED_EXT, queryExt);
-      renderer.render(scene, camera);
-      ext.endQueryEXT(ext.ANY_SAMPLES_PASSED_EXT);
-      (gl as WebGLRenderingContext).flush();
-
-      while (!ext.getQueryObjectEXT(queryExt, ext.QUERY_RESULT_AVAILABLE_EXT)) {
-        /* spin */
-      }
-      passedSamples = ext.getQueryObjectEXT(queryExt, ext.QUERY_RESULT_EXT);
-      ext.deleteQueryEXT(queryExt);
-      renderer.setRenderTarget(null);
-    }
-  }
-
-  // ------------------------------------------------------------------
-  // 3. Final fall-back → original readPixels implementation
-  // ------------------------------------------------------------------
-  if (passedSamples === null) {
-    renderer.setRenderTarget(target);
-    renderer.render(scene, camera);
-
-    const buffer = new Uint8Array(a.width * a.height * 4);
-    renderer.readRenderTargetPixels(target, 0, 0, a.width, a.height, buffer);
-    renderer.setRenderTarget(null);
-
-    let count = 0;
-    for (let i = 0; i < buffer.length; i += 4) {
-      if (buffer[i] > 128) count++;
-    }
-    passedSamples = count;
-  }
-
-  const totalPixels = a.width * a.height;
-  return passedSamples / totalPixels;
-}
-
-function computeCovizMatrix(
-  frames: FrameInfo[],
-  renderer: WebGLRenderer,
-  pathNumber: number        // new param so we can report which path
-) {
-  const n = frames.length;
-  const totalPairs = (n * (n - 1)) / 2;
-  let donePairs = 0;
-
-  const result = Array.from({ length: n }, () => Array(n).fill(0));
-
-  for (let i = 0; i < n; i++) {
-    result[i][i] = 1;
-    for (let j = i + 1; j < n; j++) {
-      // Compute visibility in both directions separately
-      const ratioAB = gpuOverlap(renderer, frames[i], frames[j]); // pixels from A also seen by B
-      const ratioBA = gpuOverlap(renderer, frames[j], frames[i]); // pixels from B also seen by A
-
-      result[i][j] = ratioAB;
-      result[j][i] = ratioBA;
-
-      // ---------------------------------
-      // Progress update every 50 pairs (counted by unique frame pairs)
-      // ---------------------------------
-      donePairs++;
-      if (donePairs % 50 === 0 || donePairs === totalPairs) {
-        const progress = donePairs / totalPairs; // 0-1 based on unique pairs
-        const payload = { pathNumber, progress };
-
-        // a) console prefix (Puppeteer sees it via page.on('console'))
-        console.log(`${MESSAGE_TYPES.COVIZ_MATRIX_PROGRESS}_${JSON.stringify(payload)}`);
-
-        // b) postMessage in case you prefer the window channel
-        window.postMessage(MESSAGE_TYPES.COVIZ_MATRIX_PROGRESS, '*');
-      }
-    }
-  }
-  return result;
-}
-
-function saveCovizMatrix(matrix: number[][], _pathNumber: number) {
-  // Intentionally left blank: avoid triggering a browser download.
-  // Puppeteer will capture the coviz matrix through the
-  // COVIZ_MATRIX_READY console and postMessage events.
-  console.debug('Coviz matrix generated', matrix);
-}
