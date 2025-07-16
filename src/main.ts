@@ -466,54 +466,54 @@ function gpuOverlap(
   material.uniforms.farB.value = b.cameraFar;
 
   // ------------------------------------------------------------------
-  // 1. Try native WebGL2 occlusion query
+  // 1. Try native WebGL2 occlusion query TODO: DISABLED FOR NOW
   // ------------------------------------------------------------------
-  const gl: WebGLRenderingContext | WebGL2RenderingContext = renderer.getContext();
-  const isWebGL2 = (gl as WebGL2RenderingContext).beginQuery !== undefined;
+  // const gl: WebGLRenderingContext | WebGL2RenderingContext = renderer.getContext();
+  // const isWebGL2 = (gl as WebGL2RenderingContext).beginQuery !== undefined;
   let passedSamples: number | null = null;
 
-  if (isWebGL2) {
-    const gl2 = gl as WebGL2RenderingContext;
-    const query = gl2.createQuery();
-    if (query) {
-      renderer.setRenderTarget(overlapRenderTarget);
-      gl2.beginQuery(gl2.ANY_SAMPLES_PASSED, query);
-      renderer.render(overlapScene, overlapCamera);
-      gl2.endQuery(gl2.ANY_SAMPLES_PASSED);
-      gl2.flush(); // ensure the commands are submitted
+  // if (isWebGL2) {
+  //   const gl2 = gl as WebGL2RenderingContext;
+  //   const query = gl2.createQuery();
+  //   if (query) {
+  //     renderer.setRenderTarget(overlapRenderTarget);
+  //     gl2.beginQuery(gl2.ANY_SAMPLES_PASSED, query);
+  //     renderer.render(overlapScene, overlapCamera);
+  //     gl2.endQuery(gl2.ANY_SAMPLES_PASSED);
+  //     gl2.flush(); // ensure the commands are submitted
 
-      // Busy-wait until the result is ready. In practice this returns quickly.
-      while (!gl2.getQueryParameter(query, gl2.QUERY_RESULT_AVAILABLE)) {
-        /* spin */
-      }
-      passedSamples = gl2.getQueryParameter(query, gl2.QUERY_RESULT);
-      gl2.deleteQuery(query);
-      renderer.setRenderTarget(null);
-    }
-  }
+  //     // Busy-wait until the result is ready. In practice this returns quickly.
+  //     while (!gl2.getQueryParameter(query, gl2.QUERY_RESULT_AVAILABLE)) {
+  //       /* spin */
+  //     }
+  //     passedSamples = gl2.getQueryParameter(query, gl2.QUERY_RESULT);
+  //     gl2.deleteQuery(query);
+  //     renderer.setRenderTarget(null);
+  //   }
+  // }
 
   // ------------------------------------------------------------------
   // 2. WebGL1 fall-back using EXT_occlusion_query_boolean
   // ------------------------------------------------------------------
-  if (passedSamples === null) {
-    // Either WebGL2 path was unavailable or failed → try extension
-    const ext: any = gl.getExtension('EXT_occlusion_query_boolean');
-    if (ext) {
-      const queryExt = ext.createQueryEXT();
-      renderer.setRenderTarget(overlapRenderTarget);
-      ext.beginQueryEXT(ext.ANY_SAMPLES_PASSED_EXT, queryExt);
-      renderer.render(overlapScene, overlapCamera);
-      ext.endQueryEXT(ext.ANY_SAMPLES_PASSED_EXT);
-      (gl as WebGLRenderingContext).flush();
+  // if (passedSamples === null) {
+  //   // Either WebGL2 path was unavailable or failed → try extension
+  //   const ext: any = gl.getExtension('EXT_occlusion_query_boolean');
+  //   if (ext) {
+  //     const queryExt = ext.createQueryEXT();
+  //     renderer.setRenderTarget(overlapRenderTarget);
+  //     ext.beginQueryEXT(ext.ANY_SAMPLES_PASSED_EXT, queryExt);
+  //     renderer.render(overlapScene, overlapCamera);
+  //     ext.endQueryEXT(ext.ANY_SAMPLES_PASSED_EXT);
+  //     (gl as WebGLRenderingContext).flush();
 
-      while (!ext.getQueryObjectEXT(queryExt, ext.QUERY_RESULT_AVAILABLE_EXT)) {
-        /* spin */
-      }
-      passedSamples = ext.getQueryObjectEXT(queryExt, ext.QUERY_RESULT_EXT);
-      ext.deleteQueryEXT(queryExt);
-      renderer.setRenderTarget(null);
-    }
-  }
+  //     while (!ext.getQueryObjectEXT(queryExt, ext.QUERY_RESULT_AVAILABLE_EXT)) {
+  //       /* spin */
+  //     }
+  //     passedSamples = ext.getQueryObjectEXT(queryExt, ext.QUERY_RESULT_EXT);
+  //     ext.deleteQueryEXT(queryExt);
+  //     renderer.setRenderTarget(null);
+  //   }
+  // }
   // ------------------------------------------------------------------
   // 3. Final fall-back → original readPixels implementation
   // ------------------------------------------------------------------
@@ -535,21 +535,6 @@ function gpuOverlap(
   const totalPixels = a.width * a.height;
   return passedSamples / totalPixels;
 
-  // renderer.setRenderTarget(overlapRenderTarget);
-  // renderer.render(overlapScene, overlapCamera);
-
-  // const buffer = new Uint8Array(a.width * a.height * 4);
-  // renderer.readRenderTargetPixels(overlapRenderTarget, 0, 0, a.width, a.height, buffer);
-
-  // let overlapCount = 0;
-  // for (let i = 0; i < buffer.length; i += 4) {
-  //   if (buffer[i] > 128) overlapCount++;
-  // }
-
-  // const total = a.width * a.height;
-  // renderer.setRenderTarget(null);
-
-  // return overlapCount / total;
 }
 
 function computeCovizMatrix(
