@@ -1225,6 +1225,9 @@ async function main() {
         continue;
       }
 
+      // Signal Puppeteer that we're ready to compute the coviz matrix
+      console.log(MESSAGE_TYPES.COVIZ_MATRIX_INITIALIZED);
+
       // -------------------------------------------------------------
       // Path finished – compute and emit coviz matrix
       // -------------------------------------------------------------
