@@ -35,17 +35,17 @@ import { MESSAGE_TYPES, PATH_STATUS } from './constants.js';
 const MIN_ABOVE_GROUND_DISTANCE = 40;
 const MAX_ABOVE_GROUND_DISTANCE = 20_000;
 const MAX_CONSECUTIVE_MISSING_INTERSECTIONS = 10;
-const MAX_NUMBER_OF_FRAME_RETRIES = 5000;
-const MESSAGE_DELAY_IN_MS = 5000;
+const MAX_NUMBER_OF_FRAME_RETRIES = 5_000;
+const MESSAGE_DELAY_IN_MS = 5_000;
 const PATH_WAIT_DELAY_IN_MS = 100;
-const PUPPETEER_WARMUP_DELAY_IN_MS = 5000;
+const PUPPETEER_WARMUP_DELAY_IN_MS = 5_000;
 const SKIP_PATH_AFTER_EXCESSIVE_MISSING_INTERSECTIONS = true;
 const SKIP_PATH_AFTER_COLLISION_WITH_GROUND = true;
 const SKIP_PATH_AFTER_UNREALISTIC_HEIGHT = true;
 
 const DEFAULT_RENDERER_WIDTH = 512;
 const DEFAULT_RENDERER_HEIGHT = 384;
-const DEFAULT_CAMERA_FAR_IN_METERS = 100000;
+const DEFAULT_CAMERA_FAR_IN_METERS = 100_000;
 const DEFAULT_CAMERA_NEAR_IN_METERS = 1;
 const DEFAULT_CAMERA_FOV_IN_DEGREES = 35;
 
@@ -101,7 +101,8 @@ function isArrayOfString(value: any) {
 function waitForCaptureConfirmation(
   waitForMessageType: string,
   signalMessageType: string,
-  timeoutWarningMessage: string
+  timeoutWarningMessage: string,
+  timeout: number = MESSAGE_DELAY_IN_MS
 ) {
   return new Promise((resolve) => {
     // Make sure to resolve the Promise,
@@ -111,7 +112,7 @@ function waitForCaptureConfirmation(
       window.removeEventListener('message', handler);
       console.warn(timeoutWarningMessage);
       resolve(undefined);
-    }, MESSAGE_DELAY_IN_MS);
+    }, timeout);
 
     const handler = (event: MessageEvent) => {
       // TODO: change to event.type === 'console' && event.detail?.text === MESSAGE_TYPES.REGULAR_FRAME_CAPTURED
@@ -1258,7 +1259,9 @@ async function main() {
         await waitForCaptureConfirmation(
           MESSAGE_TYPES.COVIZ_MATRIX_READY,
           MESSAGE_TYPES.COVIZ_MATRIX_CAPTURED,
-          'Coviz matrix capture confirmation timed out'
+          'Coviz matrix capture confirmation timed out',
+          // Coviz matrix storage is slower than regular frames
+          10_000
         );
       } catch (e) {
         console.error('Error waiting for coviz matrix capture confirmation:', e);
