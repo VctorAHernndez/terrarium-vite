@@ -38,6 +38,7 @@ const MAX_CONSECUTIVE_MISSING_INTERSECTIONS = 10;
 const MAX_NUMBER_OF_FRAME_RETRIES = 5000;
 const MESSAGE_DELAY_IN_MS = 5000;
 const PATH_WAIT_DELAY_IN_MS = 100;
+const PUPPETEER_WARMUP_DELAY_IN_MS = 5000;
 const SKIP_PATH_AFTER_EXCESSIVE_MISSING_INTERSECTIONS = true;
 const SKIP_PATH_AFTER_COLLISION_WITH_GROUND = true;
 const SKIP_PATH_AFTER_UNREALISTIC_HEIGHT = true;
@@ -1181,6 +1182,10 @@ async function main() {
     console.log('Tiles loaded');
     tilesLoading = true;
   });
+
+  // Wait for the Puppeteer to initialize
+  // TODO: we could turn this into a waitForCaptureConfirmation instead
+  await new Promise((_resolve) => setTimeout(_resolve, PUPPETEER_WARMUP_DELAY_IN_MS));
 
   for (let currentPathIndex = 0; currentPathIndex < csvUrls.length; currentPathIndex++) {
     // Reset all state for new path
