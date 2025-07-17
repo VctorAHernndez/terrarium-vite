@@ -35,16 +35,17 @@ import { MESSAGE_TYPES, PATH_STATUS } from './constants.js';
 const MIN_ABOVE_GROUND_DISTANCE = 40;
 const MAX_ABOVE_GROUND_DISTANCE = 20_000;
 const MAX_CONSECUTIVE_MISSING_INTERSECTIONS = 10;
-const MAX_NUMBER_OF_FRAME_RETRIES = 5000;
-const MESSAGE_DELAY_IN_MS = 5000;
+const MAX_NUMBER_OF_FRAME_RETRIES = 5_000;
+const MESSAGE_DELAY_IN_MS = 5_000;
 const PATH_WAIT_DELAY_IN_MS = 100;
+const PUPPETEER_WARMUP_DELAY_IN_MS = 5_000;
 const SKIP_PATH_AFTER_EXCESSIVE_MISSING_INTERSECTIONS = true;
 const SKIP_PATH_AFTER_COLLISION_WITH_GROUND = true;
 const SKIP_PATH_AFTER_UNREALISTIC_HEIGHT = true;
 
 const DEFAULT_RENDERER_WIDTH = 512;
 const DEFAULT_RENDERER_HEIGHT = 384;
-const DEFAULT_CAMERA_FAR_IN_METERS = 10000;
+const DEFAULT_CAMERA_FAR_IN_METERS = 100_000;
 const DEFAULT_CAMERA_NEAR_IN_METERS = 1;
 const DEFAULT_CAMERA_FOV_IN_DEGREES = 35;
 
@@ -95,6 +96,37 @@ function isArrayOfString(value: any) {
     return false;
   }
   return !value.some((item) => typeof item !== 'string');
+}
+
+function waitForCaptureConfirmation(
+  waitForMessageType: string,
+  signalMessageType: string,
+  timeoutWarningMessage: string,
+  timeout: number = MESSAGE_DELAY_IN_MS
+) {
+  return new Promise((resolve) => {
+    // Make sure to resolve the Promise,
+    // even if the message is never received.
+    const timeoutId = setTimeout(() => {
+      // TODO: change to 'console' instead of 'message'
+      window.removeEventListener('message', handler);
+      console.warn(timeoutWarningMessage);
+      resolve(undefined);
+    }, timeout);
+
+    const handler = (event: MessageEvent) => {
+      // TODO: change to event.type === 'console' && event.detail?.text === MESSAGE_TYPES.REGULAR_FRAME_CAPTURED
+      if (event.data === waitForMessageType) {
+        window.removeEventListener('message', handler);
+        clearTimeout(timeoutId);
+        resolve(undefined);
+      }
+    };
+
+    // Send message to Puppeteer
+    window.addEventListener('message', handler);
+    window.postMessage(signalMessageType, '*');
+  });
 }
 
 function onWindowResize(
@@ -465,12 +497,13 @@ function gpuOverlap(
   material.uniforms.farA.value = a.cameraFar;
   material.uniforms.farB.value = b.cameraFar;
 
+  const totalPixels = a.width * a.height;
+
   // ------------------------------------------------------------------
   // 1. Try native WebGL2 occlusion query TODO: DISABLED FOR NOW
   // ------------------------------------------------------------------
   // const gl: WebGLRenderingContext | WebGL2RenderingContext = renderer.getContext();
   // const isWebGL2 = (gl as WebGL2RenderingContext).beginQuery !== undefined;
-  let passedSamples: number | null = null;
 
   // if (isWebGL2) {
   //   const gl2 = gl as WebGL2RenderingContext;
@@ -486,14 +519,16 @@ function gpuOverlap(
   //     while (!gl2.getQueryParameter(query, gl2.QUERY_RESULT_AVAILABLE)) {
   //       /* spin */
   //     }
-  //     passedSamples = gl2.getQueryParameter(query, gl2.QUERY_RESULT);
+  //     const passedSamples = gl2.getQueryParameter(query, gl2.QUERY_RESULT) as number;
   //     gl2.deleteQuery(query);
   //     renderer.setRenderTarget(null);
+
+  //     return passedSamples / totalPixels;
   //   }
   // }
 
   // ------------------------------------------------------------------
-  // 2. WebGL1 fall-back using EXT_occlusion_query_boolean
+  // 2. WebGL1 fall-back using EXT_occlusion_query_boolean TODO: DISABLED FOR NOW
   // ------------------------------------------------------------------
   // if (passedSamples === null) {
   //   // Either WebGL2 path was unavailable or failed → try extension
@@ -509,32 +544,31 @@ function gpuOverlap(
   //     while (!ext.getQueryObjectEXT(queryExt, ext.QUERY_RESULT_AVAILABLE_EXT)) {
   //       /* spin */
   //     }
-  //     passedSamples = ext.getQueryObjectEXT(queryExt, ext.QUERY_RESULT_EXT);
+
+  //     const passedSamples = ext.getQueryObjectEXT(queryExt, ext.QUERY_RESULT_EXT);
   //     ext.deleteQueryEXT(queryExt);
   //     renderer.setRenderTarget(null);
+
+  //     return passedSamples / totalPixels;
   //   }
   // }
+
   // ------------------------------------------------------------------
   // 3. Final fall-back → original readPixels implementation
   // ------------------------------------------------------------------
-  if (passedSamples === null) {
-    renderer.setRenderTarget(overlapRenderTarget);
-    renderer.render(overlapScene, overlapCamera);
+  renderer.setRenderTarget(overlapRenderTarget);
+  renderer.render(overlapScene, overlapCamera);
 
-    const buffer = new Uint8Array(a.width * a.height * 4);
-    renderer.readRenderTargetPixels(overlapRenderTarget, 0, 0, a.width, a.height, buffer);
-    renderer.setRenderTarget(null);
+  const buffer = new Uint8Array(a.width * a.height * 4);
+  renderer.readRenderTargetPixels(overlapRenderTarget, 0, 0, a.width, a.height, buffer);
+  renderer.setRenderTarget(null);
 
-    let count = 0;
-    for (let i = 0; i < buffer.length; i += 4) {
-      if (buffer[i] > 128) count++;
-    }
-    passedSamples = count;
+  let passedSamples = 0;
+  for (let i = 0; i < buffer.length; i += 4) {
+    if (buffer[i] > 128) passedSamples++;
   }
 
-  const totalPixels = a.width * a.height;
   return passedSamples / totalPixels;
-
 }
 
 function computeCovizMatrix(
@@ -676,14 +710,7 @@ async function animate(
   if (currentFrameIndex >= currentPathData.length) {
     console.log(`Path ${currentPathNumber} complete.`);
     updatePathStatus(currentPathNumber, PATH_STATUS.COMPLETED, csvUrl);
-
-    if (currentPathIndex >= totalPathsCount - 1) {
-      console.log('All paths complete');
-      console.log(MESSAGE_TYPES.PROCESSING_COMPLETE);
-    }
-
     currentPathPending = false;
-
     return;
   }
 
@@ -792,14 +819,7 @@ async function animate(
         csvUrl,
         `${MAX_CONSECUTIVE_MISSING_INTERSECTIONS} consecutive missing intersections`
       );
-
-      if (currentPathIndex >= totalPathsCount - 1) {
-        console.log('All paths complete');
-        console.log(MESSAGE_TYPES.PROCESSING_COMPLETE);
-      }
-
       currentPathPending = false;
-
       return;
     }
 
@@ -843,14 +863,7 @@ async function animate(
       csvUrl,
       `intersection too close (${lookAtPoint.distance.toFixed(2)}m)`
     );
-
-    if (currentPathIndex >= totalPathsCount - 1) {
-      console.log('All paths complete');
-      console.log(MESSAGE_TYPES.PROCESSING_COMPLETE);
-    }
-
     currentPathPending = false;
-
     return;
   }
 
@@ -868,14 +881,7 @@ async function animate(
       csvUrl,
       `intersection too far (${lookAtPoint.distance.toFixed(2)}m)`
     );
-
-    if (currentPathIndex >= totalPathsCount - 1) {
-      console.log('All paths complete');
-      console.log(MESSAGE_TYPES.PROCESSING_COMPLETE);
-    }
-
     currentPathPending = false;
-
     return;
   }
 
@@ -913,28 +919,11 @@ async function animate(
   // unless we hit a timeout,
   // in which case we continue to the next frame.
   try {
-    await new Promise((resolve) => {
-      const messageHandler = (event: MessageEvent) => {
-        // TODO: change to event.type === 'console' && event.detail?.text === MESSAGE_TYPES.REGULAR_FRAME_CAPTURED
-        if (event.data === MESSAGE_TYPES.REGULAR_FRAME_CAPTURED) {
-          window.removeEventListener('message', messageHandler);
-          resolve(undefined);
-        }
-      };
-
-      // Send message to Puppeteer
-      window.addEventListener('message', messageHandler);
-      window.postMessage(MESSAGE_TYPES.REGULAR_FRAME_READY, '*');
-
-      // Make sure to resolve the Promise,
-      // even if the message is never received.
-      setTimeout(() => {
-        // TODO: change to 'console' instead of 'message'
-        window.removeEventListener('message', messageHandler);
-        console.warn('Regular frame capture confirmation timed out');
-        resolve(undefined);
-      }, MESSAGE_DELAY_IN_MS);
-    });
+    await waitForCaptureConfirmation(
+      MESSAGE_TYPES.REGULAR_FRAME_CAPTURED,
+      MESSAGE_TYPES.REGULAR_FRAME_READY,
+      'Regular frame capture confirmation timed out'
+    );
   } catch (error) {
     console.error('Error during regular frame capture:', error);
 
@@ -1028,28 +1017,11 @@ async function animate(
   // unless we hit a timeout,
   // in which case we continue to the next frame.
   try {
-    await new Promise((resolve) => {
-      const messageHandler = (event: MessageEvent) => {
-        // TODO: change to event.type === 'console' && event.detail?.text === MESSAGE_TYPES.REGULAR_FRAME_CAPTURED
-        if (event.data === MESSAGE_TYPES.DEPTH_FRAME_CAPTURED) {
-          window.removeEventListener('message', messageHandler);
-          resolve(undefined);
-        }
-      };
-
-      // Send message to Puppeteer
-      window.addEventListener('message', messageHandler);
-      window.postMessage(MESSAGE_TYPES.DEPTH_FRAME_READY, '*');
-
-      // Make sure to resolve the Promise,
-      // even if the message is never received.
-      setTimeout(() => {
-        // TODO: change to 'console' instead of 'message'
-        window.removeEventListener('message', messageHandler);
-        console.warn('Depth frame capture confirmation timed out');
-        resolve(undefined);
-      }, MESSAGE_DELAY_IN_MS);
-    });
+    await waitForCaptureConfirmation(
+      MESSAGE_TYPES.DEPTH_FRAME_CAPTURED,
+      MESSAGE_TYPES.DEPTH_FRAME_READY,
+      'Depth frame capture confirmation timed out'
+    );
   } catch (error) {
     console.error('Error during depth frame capture:', error);
   } finally {
@@ -1212,7 +1184,9 @@ async function main() {
     tilesLoading = true;
   });
 
-  let atLeastOnePathProcessed = false;
+  // Wait for the Puppeteer to initialize
+  // TODO: we could turn this into a waitForCaptureConfirmation instead
+  await new Promise((_resolve) => setTimeout(_resolve, PUPPETEER_WARMUP_DELAY_IN_MS));
 
   for (let currentPathIndex = 0; currentPathIndex < csvUrls.length; currentPathIndex++) {
     // Reset all state for new path
@@ -1226,8 +1200,6 @@ async function main() {
     const currentPathData = await loadPath(currentPathNumber, currentCsvUrl);
 
     if (currentPathData.length > 0) {
-      atLeastOnePathProcessed = true;
-
       animate(
         tiles,
         raycaster,
@@ -1259,6 +1231,9 @@ async function main() {
         continue;
       }
 
+      // Signal Puppeteer that we're ready to compute the coviz matrix
+      console.log(MESSAGE_TYPES.COVIZ_MATRIX_INITIALIZED);
+
       // -------------------------------------------------------------
       // Path finished – compute and emit coviz matrix
       // -------------------------------------------------------------
@@ -1281,23 +1256,13 @@ async function main() {
 
       // Notify puppeteer via postMessage and wait for confirmation
       try {
-        await new Promise((resolve) => {
-          const handler = (event: MessageEvent) => {
-            if (event.data === MESSAGE_TYPES.COVIZ_MATRIX_CAPTURED) {
-              window.removeEventListener('message', handler);
-              resolve(undefined);
-            }
-          };
-
-          window.addEventListener('message', handler);
-          window.postMessage(MESSAGE_TYPES.COVIZ_MATRIX_READY, '*');
-
-          setTimeout(() => {
-            window.removeEventListener('message', handler);
-            console.warn('Coviz matrix capture confirmation timed out');
-            resolve(undefined);
-          }, MESSAGE_DELAY_IN_MS);
-        });
+        await waitForCaptureConfirmation(
+          MESSAGE_TYPES.COVIZ_MATRIX_READY,
+          MESSAGE_TYPES.COVIZ_MATRIX_CAPTURED,
+          'Coviz matrix capture confirmation timed out',
+          // Coviz matrix storage is slower than regular frames
+          10_000
+        );
       } catch (e) {
         console.error('Error waiting for coviz matrix capture confirmation:', e);
       }
@@ -1307,10 +1272,8 @@ async function main() {
   }
 
   // Make sure we send the processing complete message
-  if (!atLeastOnePathProcessed) {
-    console.log('All paths complete');
-    console.log(MESSAGE_TYPES.PROCESSING_COMPLETE);
-  }
+  console.log('All paths complete');
+  console.log(MESSAGE_TYPES.PROCESSING_COMPLETE);
 }
 
 main();
