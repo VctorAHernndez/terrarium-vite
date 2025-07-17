@@ -50,7 +50,7 @@ const DEFAULT_CAMERA_NEAR_IN_METERS = 1;
 const DEFAULT_CAMERA_FOV_IN_DEGREES = 35;
 
 // Tolerance when checking occlusion in camera B
-const OVERLAP_EPSILON_METERS = 0.5;
+const OVERLAP_EPSILON_METERS = 1.0;
 
 // Global flags
 let tilesLoading = false;
@@ -359,8 +359,8 @@ function setupOverlapResources(width: number, height: number) {
   const overlapCamera = new OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
   const overlapRenderTarget = new WebGLRenderTarget(width, height);
-  overlapRenderTarget.texture.minFilter = LinearFilter;
-  overlapRenderTarget.texture.magFilter = LinearFilter;
+  overlapRenderTarget.texture.minFilter = NearestFilter;
+  overlapRenderTarget.texture.magFilter = NearestFilter;
 
   const material = new ShaderMaterial({
     uniforms: {
@@ -986,8 +986,8 @@ async function animate(
   // -------------------------------------------------------------------
   const dataTexture = new DataTexture(buffer, width, height, RGBAFormat, UnsignedByteType);
   dataTexture.flipY = true;
-  dataTexture.minFilter = LinearFilter;
-  dataTexture.magFilter = LinearFilter;
+  dataTexture.minFilter = NearestFilter;
+  dataTexture.magFilter = NearestFilter;
   dataTexture.needsUpdate = true;
 
   currentPathFrames.push({
