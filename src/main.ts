@@ -23,7 +23,6 @@ import {
   NearestFilter,
   FloatType,
   DataTexture,
-  LinearFilter,
   RGBAFormat,
   UnsignedByteType,
   Matrix4,
@@ -86,6 +85,10 @@ type FrameInfo = {
   height: number;
   cameraFar: number;
 };
+
+function normalizeAngle(angle: number) {
+  return ((angle % 360) + 360) % 360;
+}
 
 function decodeDepthFromGrayscaleRGBA(r: number, g: number, b: number, a: number) {
   return (r + g / 256 + b / 65536 + a / 16777216) / 255;
@@ -891,15 +894,28 @@ async function animate(
   const width = depthTarget.width;
   const height = depthTarget.height;
 
+  // Extract actual camera rotation angles and position
+  const cameraRotation = getCameraRotationAngles(camera);
+  const cameraPosition = getCameraPosition(tiles, camera);
+
   const metadata = {
     pathNumber: currentPathNumber,
     frameIndex: currentFrameIndex,
-    latitude: currentPoint.lat,
-    longitude: currentPoint.lng,
-    altitude: currentPoint.altitude,
-    heading: currentPoint.heading,
-    tilt: currentPoint.tilt,
-    roll: currentPoint.roll,
+    // Use actual camera position instead of currentPoint values
+    latitude: cameraPosition.lat,
+    longitude: cameraPosition.lng,
+    altitude: cameraPosition.altitude,
+    // Use actual camera rotation instead of currentPoint values
+    heading: cameraRotation.heading,
+    tilt: cameraRotation.tilt,
+    roll: cameraRotation.roll,
+    // Keep original values for comparison
+    headingOriginal: currentPoint.heading,
+    tiltOriginal: currentPoint.tilt,
+    rollOriginal: currentPoint.roll,
+    latitudeOriginal: currentPoint.lat,
+    longitudeOriginal: currentPoint.lng,
+    altitudeOriginal: currentPoint.altitude,
     width: width,
     height: height,
     cameraFov: camera.fov,
@@ -1048,6 +1064,49 @@ async function animate(
       )
     );
   }
+}
+
+function getCameraRotationAngles(camera: PerspectiveCamera) {
+  // Extract the current camera rotation in radians
+  const x = camera.rotation.x; // tilt
+  const y = camera.rotation.y; // heading
+  const z = camera.rotation.z; // roll
+
+  // Reverse the transformations applied when setting the camera rotation:
+  // Original transformations:
+  // x = -(90 - currentPoint.tilt) * MathUtils.DEG2RAD
+  // y = -(currentPoint.heading + 90) * MathUtils.DEG2RAD
+  // z = currentPoint.roll * MathUtils.DEG2RAD
+
+  // Reverse the transformations:
+  const tilt = 90 + x * MathUtils.RAD2DEG; // Reverse: -(90 - tilt) -> tilt = 90 + x
+  const heading = -(y * MathUtils.RAD2DEG) - 90; // Reverse: -(heading + 90) -> heading = -y - 90
+  const roll = z * MathUtils.RAD2DEG; // Reverse: roll * DEG2RAD -> roll = z * RAD2DEG
+
+  return {
+    heading: normalizeAngle(heading),
+    tilt: normalizeAngle(tilt),
+    roll: normalizeAngle(roll),
+  };
+}
+
+function getCameraPosition(tiles: TilesRenderer, camera: PerspectiveCamera) {
+  // Get the camera's world position
+  const worldPosition = camera.position.clone();
+
+  // Convert world position to local position in tiles coordinate system
+  const mat = tiles.group.matrixWorld.clone().invert();
+  const localPosition = worldPosition.applyMatrix4(mat);
+
+  // Convert to WGS84 coordinates
+  const res = {} as WGS84Point;
+  WGS84_ELLIPSOID.getPositionToCartographic(localPosition, res);
+
+  return {
+    lat: res.lat * MathUtils.RAD2DEG,
+    lng: res.lon * MathUtils.RAD2DEG,
+    altitude: res.height,
+  };
 }
 
 function parseQueryParams() {
