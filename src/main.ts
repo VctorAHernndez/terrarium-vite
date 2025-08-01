@@ -23,7 +23,6 @@ import {
   NearestFilter,
   FloatType,
   DataTexture,
-  LinearFilter,
   RGBAFormat,
   UnsignedByteType,
   Matrix4,
@@ -86,6 +85,10 @@ type FrameInfo = {
   height: number;
   cameraFar: number;
 };
+
+function normalizeAngle(angle: number) {
+  return ((angle % 360) + 360) % 360;
+}
 
 function decodeDepthFromGrayscaleRGBA(r: number, g: number, b: number, a: number) {
   return (r + g / 256 + b / 65536 + a / 16777216) / 255;
@@ -1058,57 +1061,26 @@ async function animate(
 }
 
 function getCameraRotationAngles(camera: PerspectiveCamera) {
-  // Get the camera's world direction (where it's looking)
-  const worldDirection = camera.getWorldDirection(new Vector3());
+  // Extract the current camera rotation in radians
+  const x = camera.rotation.x; // tilt
+  const y = camera.rotation.y; // heading
+  const z = camera.rotation.z; // roll
 
-  // Get the camera's world up vector (camera's local Y-axis in world space)
-  const worldUp = new Vector3(0, 1, 0);
-  worldUp.applyQuaternion(camera.quaternion);
+  // Reverse the transformations applied when setting the camera rotation:
+  // Original transformations:
+  // x = -(90 - currentPoint.tilt) * MathUtils.DEG2RAD
+  // y = -(currentPoint.heading + 90) * MathUtils.DEG2RAD
+  // z = currentPoint.roll * MathUtils.DEG2RAD
 
-  // Get the camera's world right vector (camera's local X-axis in world space)
-  const worldRight = new Vector3(1, 0, 0);
-  worldRight.applyQuaternion(camera.quaternion);
-
-  // Calculate heading (yaw) from the direction vector projected onto the XZ plane
-  const heading = Math.atan2(worldDirection.x, worldDirection.z) * MathUtils.RAD2DEG;
-
-  // Calculate tilt (pitch) from the Y component of the direction vector
-  const tilt = Math.asin(worldDirection.y) * MathUtils.RAD2DEG;
-
-  // Calculate roll from the angle between world up and camera's up vector
-  // Project both vectors onto the plane perpendicular to the direction
-  const directionLength = worldDirection.length();
-  if (directionLength === 0) {
-    return {
-      heading: 0,
-      tilt: 0,
-      roll: 0,
-    };
-  }
-
-  const normalizedDirection = worldDirection.clone().normalize();
-
-  // Project world up onto the plane perpendicular to direction
-  const worldUpProjected = worldUp
-    .clone()
-    .sub(normalizedDirection.clone().multiplyScalar(worldUp.dot(normalizedDirection)));
-
-  // Project camera up onto the same plane
-  const cameraUpProjected = new Vector3(0, 1, 0);
-  cameraUpProjected.applyQuaternion(camera.quaternion);
-  cameraUpProjected.sub(
-    normalizedDirection.clone().multiplyScalar(cameraUpProjected.dot(normalizedDirection))
-  );
-
-  // Calculate roll as the angle between these projected vectors
-  const roll =
-    Math.atan2(cameraUpProjected.dot(worldRight), cameraUpProjected.dot(worldUpProjected)) *
-    MathUtils.RAD2DEG;
+  // Reverse the transformations:
+  const tilt = 90 + x * MathUtils.RAD2DEG; // Reverse: -(90 - tilt) -> tilt = 90 + x
+  const heading = -(y * MathUtils.RAD2DEG) - 90; // Reverse: -(heading + 90) -> heading = -y - 90
+  const roll = z * MathUtils.RAD2DEG; // Reverse: roll * DEG2RAD -> roll = z * RAD2DEG
 
   return {
-    heading: ((heading % 360) + 360) % 360,
-    tilt: ((tilt % 360) + 360) % 360,
-    roll: ((roll % 360) + 360) % 360,
+    heading: normalizeAngle(heading),
+    tilt: normalizeAngle(tilt),
+    roll: normalizeAngle(roll),
   };
 }
 
