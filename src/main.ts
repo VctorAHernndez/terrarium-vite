@@ -894,22 +894,28 @@ async function animate(
   const width = depthTarget.width;
   const height = depthTarget.height;
 
-  // Extract actual camera rotation angles
+  // Extract actual camera rotation angles and position
   const cameraRotation = getCameraRotationAngles(camera);
+  const cameraPosition = getCameraPosition(tiles, camera);
 
   const metadata = {
     pathNumber: currentPathNumber,
     frameIndex: currentFrameIndex,
-    latitude: currentPoint.lat,
-    longitude: currentPoint.lng,
-    altitude: currentPoint.altitude,
+    // Use actual camera position instead of currentPoint values
+    latitude: cameraPosition.lat,
+    longitude: cameraPosition.lng,
+    altitude: cameraPosition.altitude,
     // Use actual camera rotation instead of currentPoint values
     heading: cameraRotation.heading,
     tilt: cameraRotation.tilt,
     roll: cameraRotation.roll,
+    // Keep original values for comparison
     headingOriginal: currentPoint.heading,
     tiltOriginal: currentPoint.tilt,
     rollOriginal: currentPoint.roll,
+    latitudeOriginal: currentPoint.lat,
+    longitudeOriginal: currentPoint.lng,
+    altitudeOriginal: currentPoint.altitude,
     width: width,
     height: height,
     cameraFov: camera.fov,
@@ -1081,6 +1087,25 @@ function getCameraRotationAngles(camera: PerspectiveCamera) {
     heading: normalizeAngle(heading),
     tilt: normalizeAngle(tilt),
     roll: normalizeAngle(roll),
+  };
+}
+
+function getCameraPosition(tiles: TilesRenderer, camera: PerspectiveCamera) {
+  // Get the camera's world position
+  const worldPosition = camera.position.clone();
+
+  // Convert world position to local position in tiles coordinate system
+  const mat = tiles.group.matrixWorld.clone().invert();
+  const localPosition = worldPosition.applyMatrix4(mat);
+
+  // Convert to WGS84 coordinates
+  const res = {} as WGS84Point;
+  WGS84_ELLIPSOID.getPositionToCartographic(localPosition, res);
+
+  return {
+    lat: res.lat * MathUtils.RAD2DEG,
+    lng: res.lon * MathUtils.RAD2DEG,
+    altitude: res.height,
   };
 }
 
